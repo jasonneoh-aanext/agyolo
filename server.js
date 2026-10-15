@@ -25,6 +25,32 @@ let latestActiveTurn = null;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * `node-pty` v1.1.0 ships `prebuilds/<platform>-<arch>/spawn-helper` with 0644 (-rw-r--r--)
+ * permissions in its npm tarball, which causes `pty.spawn()` to throw `Error: posix_spawnp failed.`.
+ * Ensure the helper binary is executable before spawning any PTY process.
+ */
+function ensureNodePtySpawnHelperExecutable() {
+  try {
+    const ptyPkgDir = path.dirname(require.resolve('node-pty/package.json'));
+    const candidates = [
+      path.join(ptyPkgDir, 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper'),
+      path.join(ptyPkgDir, 'build', 'Release', 'spawn-helper'),
+      path.join(ptyPkgDir, 'build', 'Debug', 'spawn-helper')
+    ];
+    for (const helperPath of candidates) {
+      if (fs.existsSync(helperPath)) {
+        const mode = fs.statSync(helperPath).mode;
+        if ((mode & 0o111) === 0) {
+          fs.chmodSync(helperPath, mode | 0o755);
+        }
+      }
+    }
+  } catch (_) {}
+}
+
+ensureNodePtySpawnHelperExecutable();
+
+/**
  * Strip ANSI escape sequences from raw PTY output.
  */
 function stripAnsi(str) {
@@ -532,6 +558,11 @@ function runAgyTurn({
       cwd: validCwd,
       env: { GOOGLE_CLOUD_PROJECT: GCP_PROJECT }
     });
+
+    ensureNodePtySpawnHelperExecutable();
+    if (path.isAbsolute(AGY_BIN) && !fs.existsSync(AGY_BIN)) {
+      throw new Error(`AGY binary not found at ${AGY_BIN}. Set AGY_BIN env var to the path of your agy binary.`);
+    }
 
     const ptyProcess = pty.spawn(AGY_BIN, args, {
       name: 'xterm-256color',
