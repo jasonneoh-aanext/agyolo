@@ -22,3 +22,8 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Rust / Tauri build artifacts
+src-tauri/target/
+dist/
+
