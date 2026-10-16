@@ -1,5 +1,7 @@
+const assert = require('assert');
 const http = require('http');
 const { app } = require('./server');
+const { parseTranscriptLines } = require('./lib/turnState');
 
 function httpGet(port, urlPath) {
   return new Promise((resolve, reject) => {
@@ -112,6 +114,171 @@ function streamChatRequest(port, payload, onAskQuestion) {
   });
 }
 
+function runTurnStateUnitTests() {
+  console.log('3. Running Turn & Background Lifecycle Unit Tests (gemini-work#49)...');
+
+  // Step 0: User prompt
+  // Step 1: PLANNER_RESPONSE calling run_command
+  // Step 2: GENERIC step with RUNNING background task id
+  // Step 3: Intermediate PLANNER_RESPONSE (DONE, no tool_calls) yielding while waiting for wakeup
+  const intermediateLines = [
+    JSON.stringify({
+      step_index: 0,
+      type: 'USER_INPUT',
+      content: '<USER_REQUEST>Run a background build</USER_REQUEST>'
+    }),
+    JSON.stringify({
+      step_index: 1,
+      type: 'PLANNER_RESPONSE',
+      status: 'DONE',
+      thinking: 'Starting build in background',
+      tool_calls: [
+        {
+          name: 'run_command',
+          args: {
+            CommandLine: 'npm run build',
+            Cwd: '/Users/jason/projects/agy-test',
+            toolAction: 'Running build'
+          }
+        }
+      ]
+    }),
+    JSON.stringify({
+      step_index: 2,
+      type: 'GENERIC',
+      status: 'RUNNING',
+      content:
+        'Created At: 2026-10-16T12:00:00Z\nTool is running as a background task with task id: conv-123/task-1'
+    }),
+    JSON.stringify({
+      step_index: 3,
+      type: 'PLANNER_RESPONSE',
+      status: 'DONE',
+      content: 'I started the build in the background and will wait for it to finish.',
+      tool_calls: []
+    })
+  ];
+
+  const midParsed = parseTranscriptLines(intermediateLines, { baselineStepCount: 0 });
+  assert.strictEqual(midParsed.turnState.hasPendingBackgroundWork, true, 'Should detect active background task');
+  assert.strictEqual(midParsed.turnState.isTurnComplete, false, 'Intermediate yield must NOT mark turn complete');
+  assert.strictEqual(midParsed.workspaceCwd, '/Users/jason/projects/agy-test', 'Should extract fallback workspaceCwd');
+  const bgTool = midParsed.items.find((i) => i.role === 'tool_call');
+  assert.strictEqual(bgTool.status, 'running', 'Backgrounded tool call should remain in running state');
+  assert.strictEqual(bgTool.isBackground, true, 'Backgrounded tool call should set isBackground=true');
+
+  // Step 4: Reactive wakeup via USER_INPUT containing <SYSTEM_MESSAGE> (must NOT render as fake user message!)
+  // Step 5: Final PLANNER_RESPONSE (DONE, no tool_calls)
+  const completedLines = [
+    ...intermediateLines,
+    JSON.stringify({
+      step_index: 4,
+      type: 'USER_INPUT',
+      content:
+        'The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n<SYSTEM_MESSAGE>\n[Message] timestamp=2026-10-16T12:00:05Z sender=conv-123/task-1 priority=MESSAGE_PRIORITY_HIGH content=Task id "conv-123/task-1" finished with result:\n\nThe command exited with code 0.\nOutput:\nBUILD_SUCCESS\n</SYSTEM_MESSAGE>'
+    }),
+    JSON.stringify({
+      step_index: 5,
+      type: 'PLANNER_RESPONSE',
+      status: 'DONE',
+      content: 'The background build succeeded.',
+      tool_calls: []
+    })
+  ];
+
+  const finalParsed = parseTranscriptLines(completedLines, { baselineStepCount: 0 });
+  assert.strictEqual(finalParsed.turnState.hasPendingBackgroundWork, false, 'Background task should resolve on wakeup');
+  assert.strictEqual(finalParsed.turnState.isTurnComplete, true, 'Turn should complete after wakeup and final response');
+
+  const userMessages = finalParsed.items.filter((i) => i.role === 'user');
+  assert.strictEqual(userMessages.length, 1, '<SYSTEM_MESSAGE> wakeup must not render as a fake user message');
+
+  const resolvedTool = finalParsed.items.find((i) => i.role === 'tool_call');
+  assert.strictEqual(resolvedTool.status, 'done', 'Background tool should transition to done');
+  assert.ok(
+    resolvedTool.output.includes('BUILD_SUCCESS'),
+    'Background tool output should append completion result from <SYSTEM_MESSAGE>'
+  );
+
+  // Subagent + TimerCondition='any' early-cancellation lifecycle test
+  const subagentId = '11111111-2222-3333-4444-555555555555';
+  const subagentAndTimerLines = [
+    JSON.stringify({
+      step_index: 0,
+      type: 'USER_INPUT',
+      content: '<USER_REQUEST>Spawn a researcher subagent and set a liveness timer</USER_REQUEST>'
+    }),
+    JSON.stringify({
+      step_index: 1,
+      type: 'PLANNER_RESPONSE',
+      status: 'DONE',
+      tool_calls: [
+        {
+          name: 'invoke_subagent',
+          args: {
+            Subagents: [{ TypeName: 'research', Role: 'Code Researcher', Prompt: 'Audit files' }]
+          }
+        },
+        {
+          name: 'schedule',
+          args: {
+            DurationSeconds: 300,
+            Prompt: 'Check subagent progress',
+            TimerCondition: 'any'
+          }
+        }
+      ]
+    }),
+    JSON.stringify({
+      step_index: 2,
+      type: 'GENERIC',
+      status: 'DONE',
+      content: `Spawned subagent with conversationID: ${subagentId}`
+    }),
+    JSON.stringify({
+      step_index: 3,
+      type: 'GENERIC',
+      status: 'DONE',
+      content: 'Tool is running as a background task with task id: conv-999/task-2'
+    }),
+    JSON.stringify({
+      step_index: 4,
+      type: 'PLANNER_RESPONSE',
+      status: 'DONE',
+      content: 'Waiting for subagent...',
+      tool_calls: []
+    })
+  ];
+
+  const subMid = parseTranscriptLines(subagentAndTimerLines, { baselineStepCount: 0 });
+  assert.strictEqual(subMid.turnState.hasPendingBackgroundWork, true, 'Subagent and timer should be pending');
+  assert.strictEqual(subMid.turnState.pendingBackgroundCount, 2, 'Should count both subagent and timer');
+  assert.strictEqual(subMid.turnState.isTurnComplete, false, 'Must not exit while subagent/timer pending');
+
+  // Subagent sends wakeup message -> resolves subagent AND early-cancels TimerCondition='any'
+  const subDoneLines = [
+    ...subagentAndTimerLines,
+    JSON.stringify({
+      step_index: 5,
+      type: 'SYSTEM_MESSAGE',
+      content: `<SYSTEM_MESSAGE>\n[Message] timestamp=2026-10-16T12:01:00Z sender=${subagentId} priority=NORMAL content=Audit complete: 0 issues.\n</SYSTEM_MESSAGE>`
+    }),
+    JSON.stringify({
+      step_index: 6,
+      type: 'PLANNER_RESPONSE',
+      status: 'DONE',
+      content: 'The researcher subagent finished with 0 issues.',
+      tool_calls: []
+    })
+  ];
+
+  const subFinal = parseTranscriptLines(subDoneLines, { baselineStepCount: 0 });
+  assert.strictEqual(subFinal.turnState.hasPendingBackgroundWork, false, 'Subagent wakeup should resolve both subagent and any-timer');
+  assert.strictEqual(subFinal.turnState.isTurnComplete, true, 'Turn should complete after subagent wakeup');
+
+  console.log('   -> Passed all Turn & Background Lifecycle assertions!');
+}
+
 async function main() {
   const runLiveAsk = process.argv.includes('--ask');
   const server = app.listen(0, '127.0.0.1', async () => {
@@ -119,21 +286,36 @@ async function main() {
     console.log(`=== Express + node-pty Web UI POC Server on http://127.0.0.1:${port} ===\n`);
 
     try {
-      // 1. Static HTML page check
+      // 1. Static HTML page and modular assets check
       const indexRes = await httpGet(port, '/');
-      console.log(`1. Static Web UI (GET /): status=${indexRes.statusCode}, bytes=${indexRes.body.length}`);
-
-      // 2. Check session e1fad8fe (user's gh repo session with ask_question)
-      const askSessionRes = await httpGet(port, '/api/sessions/e1fad8fe-826f-4914-bea8-ee27e4112d8b');
-      const askSessionData = JSON.parse(askSessionRes.body);
-      const askItems = (askSessionData.items || []).filter((i) => i.role === 'ask_question');
+      const cssRes = await httpGet(port, '/styles.css');
+      const jsRes = await httpGet(port, '/app.js');
+      assert.strictEqual(indexRes.statusCode, 200);
+      assert.strictEqual(cssRes.statusCode, 200);
+      assert.strictEqual(jsRes.statusCode, 200);
       console.log(
-        `2. Historical ask_question Parser (e1fad8fe): found ${askItems.length} ask_question UI card(s):`,
-        askItems.map((i) => ({ summary: i.summary, status: i.status, questions: i.questions }))
+        `1. Static Web UI: GET / (${indexRes.body.length}B), /styles.css (${cssRes.body.length}B), /app.js (${jsRes.body.length}B)`
       );
 
+      // 2. Check sessions list includes live progress metadata fields
+      const sessionsRes = await httpGet(port, '/api/sessions');
+      assert.strictEqual(sessionsRes.statusCode, 200);
+      const sessionsData = JSON.parse(sessionsRes.body);
+      assert.ok(Array.isArray(sessionsData.sessions), 'sessions should be an array');
+      if (sessionsData.sessions.length > 0) {
+        const sample = sessionsData.sessions[0];
+        assert.strictEqual(typeof sample.isRunning, 'boolean');
+        assert.strictEqual(typeof sample.state, 'string');
+      }
+      console.log(
+        `2. Multi-Session API (GET /api/sessions): returned ${sessionsData.sessions.length} sessions with live progress metadata`
+      );
+
+      // 3. Unit tests for background task / wakeup lifecycle
+      runTurnStateUnitTests();
+
       if (runLiveAsk) {
-        console.log('\n3. Running Live ask_question Roundtrip Test (POST /api/chat -> POST /api/ask-question)...');
+        console.log('\n4. Running Live ask_question Roundtrip Test (POST /api/chat -> POST /api/ask-question)...');
         const turn = await streamChatRequest(
           port,
           {
@@ -141,7 +323,6 @@ async function main() {
               'Call ask_question right now to ask me "Should the repository be Private or Public?" with options ["(Recommended) Private repository", "Public repository"]. Once I answer, reply with "SELECTED_VISIBILITY=" followed by my choice.'
           },
           (askData) => {
-            // Wait 600ms for BubbleTea AskQuestion UI to finish rendering, then select option index 1 ("Public repository")
             setTimeout(async () => {
               console.log('  -> Posting answer via POST /api/ask-question (selecting option index 1: Public repository)...');
               const resp = await httpPostJson(port, '/api/ask-question', {

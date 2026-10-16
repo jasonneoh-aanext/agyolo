@@ -3,6 +3,7 @@ const pty = require('node-pty');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { parseTranscriptLines } = require('./lib/turnState');
 
 const app = express();
 app.use(express.json());
@@ -12,15 +13,18 @@ const PORT = process.env.PORT || 3000;
 const AGY_BIN = process.env.AGY_BIN || path.join(os.homedir(), '.local/bin/agy');
 const GCP_PROJECT = process.env.GOOGLE_CLOUD_PROJECT || 'next-gemini-ent-prd';
 const AGY_CLI_DIR = path.join(os.homedir(), '.gemini/antigravity-cli');
+const SECONDARY_AGY_DIR = path.join(os.homedir(), '.gemini/antigravity');
 const BRAIN_DIR = path.join(AGY_CLI_DIR, 'brain');
+const SECONDARY_BRAIN_DIR = path.join(SECONDARY_AGY_DIR, 'brain');
+const BRAIN_DIRS = [BRAIN_DIR, SECONDARY_BRAIN_DIR];
 const SUMMARIES_DB = path.join(AGY_CLI_DIR, 'conversation_summaries.db');
 
 // Keep in-memory history of permission prompts captured per session during server lifetime
 const sessionPermissions = new Map();
 
-// Active live PTY turns keyed by sessionId (plus 'latest' pointer) so Web UI can answer ask_question
+// Active live PTY turns keyed by sessionId and by turnId for concurrent multi-session execution
 const activeTurns = new Map();
-let latestActiveTurn = null;
+const activeTurnsByTurnId = new Map();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -223,193 +227,40 @@ async function sendAskQuestionKeystrokes(ptyProcess, questions, submission) {
 }
 
 /**
- * Locate the transcript file for a given conversation UUID.
+ * Locate the transcript file for a given conversation UUID across primary and secondary brain dirs.
  */
 function getTranscriptPath(sessionId) {
-  const logsDir = path.join(BRAIN_DIR, sessionId, '.system_generated', 'logs');
-  const fullPath = path.join(logsDir, 'transcript_full.jsonl');
-  const compactPath = path.join(logsDir, 'transcript.jsonl');
-  if (fs.existsSync(fullPath)) return fullPath;
-  if (fs.existsSync(compactPath)) return compactPath;
+  if (!sessionId || typeof sessionId !== 'string') return null;
+  for (const brainDir of BRAIN_DIRS) {
+    const logsDir = path.join(brainDir, sessionId, '.system_generated', 'logs');
+    const fullPath = path.join(logsDir, 'transcript_full.jsonl');
+    const compactPath = path.join(logsDir, 'transcript.jsonl');
+    if (fs.existsSync(fullPath)) return fullPath;
+    if (fs.existsSync(compactPath)) return compactPath;
+  }
   return null;
 }
 
 /**
- * Clean `<USER_REQUEST>...</USER_REQUEST>` wrapper from `USER_INPUT` content.
+ * Build runtime progress metadata for a session if an active turn is currently running.
  */
-function extractUserRequest(rawContent) {
-  if (!rawContent) return '';
-  const match = rawContent.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/i);
-  if (match && match[1]) return match[1].trim();
-  return rawContent.trim();
-}
-
-/**
- * Parse `A1: ...\nA2: ...` from an `ask_question` GENERIC tool output step.
- */
-function parseAskQuestionOutput(rawOutput) {
-  const answersByQuestion = {};
-  if (!rawOutput) return answersByQuestion;
-  const lines = rawOutput.split(/\r?\n/);
-  for (const line of lines) {
-    const m = line.match(/^A(\d+):\s*(.+)$/);
-    if (m) {
-      const qIndex = parseInt(m[1], 10) - 1;
-      answersByQuestion[qIndex] = m[2].trim();
-    }
+function getLiveSessionMeta(sessionId) {
+  const controller = sessionId
+    ? activeTurns.get(sessionId) || activeTurnsByTurnId.get(sessionId)
+    : null;
+  if (!controller) {
+    return {
+      isRunning: false,
+      turnId: null,
+      state: 'idle',
+      message: 'Idle',
+      statusMessage: 'Idle',
+      progressLabel: '',
+      hasPendingQuestion: false,
+      pendingBackgroundCount: 0
+    };
   }
-  return answersByQuestion;
-}
-
-/**
- * Parse raw JSONL lines from `transcript_full.jsonl` into structured UI items.
- * Pairs `GENERIC` tool outputs with their preceding `PLANNER_RESPONSE` tool calls,
- * and elevates `ask_question` tool calls into interactive Question UI items.
- */
-function parseTranscriptLines(rawLines) {
-  const rawSteps = [];
-  for (const line of rawLines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      rawSteps.push(JSON.parse(trimmed));
-    } catch (_) {}
-  }
-
-  const items = [];
-  let pendingToolItems = [];
-
-  for (const step of rawSteps) {
-    const stepIndex = step.step_index;
-    const createdAt = step.created_at || null;
-
-    if (step.type === 'USER_INPUT') {
-      pendingToolItems = [];
-      items.push({
-        id: `step-${stepIndex}-user`,
-        stepIndex,
-        role: 'user',
-        content: extractUserRequest(step.content),
-        createdAt
-      });
-      continue;
-    }
-
-    if (step.source === 'SYSTEM' || step.type === 'SYSTEM_MESSAGE') {
-      // Skip synthetic cold-resume SYSTEM_MESSAGE steps per AGY_IMPLEMENTATION.md Section 2.3
-      continue;
-    }
-
-    if (step.type === 'PLANNER_RESPONSE') {
-      if (step.thinking && step.thinking.trim()) {
-        items.push({
-          id: `step-${stepIndex}-thought`,
-          stepIndex,
-          role: 'thought',
-          content: step.thinking.trim(),
-          createdAt
-        });
-      }
-
-      if (Array.isArray(step.tool_calls) && step.tool_calls.length > 0) {
-        pendingToolItems = [];
-        step.tool_calls.forEach((tc, idx) => {
-          let args = tc.args || {};
-          if (typeof args === 'string') {
-            try {
-              args = JSON.parse(args);
-            } catch (_) {}
-          }
-
-          if (tc.name === 'ask_question') {
-            const askItem = {
-              id: `step-${stepIndex}-ask-${idx}`,
-              stepIndex,
-              role: 'ask_question',
-              toolName: 'ask_question',
-              summary: args.toolAction || args.toolSummary || 'Question from Antigravity',
-              questions: Array.isArray(args.questions) ? args.questions : [],
-              args,
-              output: null,
-              parsedAnswers: {},
-              status: 'waiting',
-              createdAt
-            };
-            pendingToolItems.push(askItem);
-            items.push(askItem);
-            return;
-          }
-
-          const summary =
-            args.toolAction ||
-            args.toolSummary ||
-            args.CommandLine ||
-            args.AbsolutePath ||
-            JSON.stringify(args);
-          const detail =
-            args.CommandLine ||
-            args.AbsolutePath ||
-            args.TargetFile ||
-            args.Url ||
-            args.query ||
-            '';
-
-          const toolItem = {
-            id: `step-${stepIndex}-tool-${idx}`,
-            stepIndex,
-            role: 'tool_call',
-            toolName: tc.name || 'tool',
-            summary,
-            detail,
-            bypassSandbox: Boolean(args.BypassSandbox),
-            args,
-            output: null,
-            status: 'running',
-            createdAt
-          };
-          pendingToolItems.push(toolItem);
-          items.push(toolItem);
-        });
-      }
-
-      if (step.content && step.content.trim()) {
-        items.push({
-          id: `step-${stepIndex}-assistant`,
-          stepIndex,
-          role: 'assistant',
-          content: step.content.trim(),
-          createdAt
-        });
-      }
-      continue;
-    }
-
-    if (step.type === 'GENERIC') {
-      const targetTool = pendingToolItems.find((t) => t.output === null);
-      if (targetTool) {
-        targetTool.output = step.content || '';
-        targetTool.status = 'done';
-        if (targetTool.role === 'ask_question') {
-          targetTool.parsedAnswers = parseAskQuestionOutput(step.content || '');
-        }
-      } else {
-        items.push({
-          id: `step-${stepIndex}-generic`,
-          stepIndex,
-          role: 'tool_call',
-          toolName: 'tool_result',
-          summary: 'Tool output',
-          detail: '',
-          args: {},
-          output: step.content || '',
-          status: 'done',
-          createdAt
-        });
-      }
-    }
-  }
-
-  return { rawSteps, items };
+  return controller.getSnapshotMeta();
 }
 
 /**
@@ -417,29 +268,64 @@ function parseTranscriptLines(rawLines) {
  */
 function readConversation(sessionId) {
   const transcriptPath = getTranscriptPath(sessionId);
+  const liveMeta = getLiveSessionMeta(sessionId);
   if (!transcriptPath) {
+    const controller = sessionId
+      ? activeTurns.get(sessionId) || activeTurnsByTurnId.get(sessionId)
+      : null;
     return {
       sessionId,
       rawSteps: [],
-      items: [],
-      permissions: sessionPermissions.get(sessionId) || []
+      items: controller ? controller.items : [],
+      permissions: sessionPermissions.get(sessionId) || (controller ? controller.permissions : []),
+      ...liveMeta
     };
   }
-  const content = fs.readFileSync(transcriptPath, 'utf8');
+
+  let content = '';
+  try {
+    content = fs.readFileSync(transcriptPath, 'utf8');
+  } catch (err) {
+    return {
+      sessionId,
+      transcriptPath,
+      rawSteps: [],
+      items: [],
+      permissions: sessionPermissions.get(sessionId) || [],
+      error: `Failed to read transcript for session "${sessionId}": ${err.message}`,
+      ...liveMeta
+    };
+  }
+
   const lines = content.split(/\r?\n/).filter(Boolean);
-  const { rawSteps, items } = parseTranscriptLines(lines);
+  const { rawSteps, items, turnState, workspaceCwd } = parseTranscriptLines(lines, {
+    brainDirs: BRAIN_DIRS
+  });
+
+  // If no live turn is running for this session, normalize any interrupted 'running' tool calls
+  if (!liveMeta.isRunning) {
+    for (const item of items) {
+      if (item.role === 'tool_call' && item.status === 'running') {
+        item.status = 'done';
+      }
+    }
+  }
+
   return {
     sessionId,
     transcriptPath,
+    workspace: workspaceCwd || '',
     rawSteps,
     items,
-    permissions: sessionPermissions.get(sessionId) || []
+    turnState,
+    permissions: sessionPermissions.get(sessionId) || [],
+    ...liveMeta
   };
 }
 
 /**
  * List sessions from `conversation_summaries.db` (via node:sqlite if available)
- * combined with a fast directory scan of `~/.gemini/antigravity-cli/brain/`.
+ * combined with a fast directory scan of primary/secondary brain dirs and active turns.
  */
 function listSessions() {
   const sessionsMap = new Map();
@@ -478,9 +364,10 @@ function listSessions() {
     } catch (_) {}
   }
 
-  if (fs.existsSync(BRAIN_DIR)) {
+  for (const brainDir of BRAIN_DIRS) {
+    if (!fs.existsSync(brainDir)) continue;
     try {
-      const entries = fs.readdirSync(BRAIN_DIR, { withFileTypes: true });
+      const entries = fs.readdirSync(brainDir, { withFileTypes: true });
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
         const id = entry.name;
@@ -490,7 +377,7 @@ function listSessions() {
         const stat = fs.statSync(tPath);
         const content = fs.readFileSync(tPath, 'utf8');
         const lines = content.split(/\r?\n/).filter(Boolean);
-        const { items } = parseTranscriptLines(lines);
+        const { items, workspaceCwd } = parseTranscriptLines(lines, { brainDirs: BRAIN_DIRS });
         const firstUser = items.find((i) => i.role === 'user');
         const existing = sessionsMap.get(id);
 
@@ -502,30 +389,66 @@ function listSessions() {
           preview: (existing && existing.preview) || (firstUser ? firstUser.content : ''),
           stepCount: lines.length,
           updatedAt: stat.mtime.toISOString(),
-          workspace: (existing && existing.workspace) || ''
+          workspace: (existing && existing.workspace) || workspaceCwd || ''
         });
       }
     } catch (_) {}
   }
 
-  return Array.from(sessionsMap.values()).sort((a, b) =>
-    (b.updatedAt || '').localeCompare(a.updatedAt || '')
-  );
+  // Merge in-flight active turns (including brand-new turns that haven't flushed a transcript yet)
+  for (const controller of activeTurnsByTurnId.values()) {
+    const sid = controller.sessionId || controller.turnId;
+    if (!sid) continue;
+    const existing = sessionsMap.get(sid);
+    const meta = controller.getSnapshotMeta();
+    sessionsMap.set(sid, {
+      id: sid,
+      title:
+        (existing && existing.title) ||
+        (controller.initialPrompt ? controller.initialPrompt.slice(0, 60) : `Session ${sid.slice(0, 8)}`),
+      preview: (existing && existing.preview) || controller.initialPrompt || '',
+      stepCount: Math.max((existing && existing.stepCount) || 0, controller.stepCount || 0),
+      updatedAt: controller.updatedAt || (existing && existing.updatedAt) || new Date().toISOString(),
+      workspace: (existing && existing.workspace) || controller.cwd || '',
+      ...meta
+    });
+  }
+
+  // Enrich all sessions with live status metadata
+  const result = Array.from(sessionsMap.values()).map((s) => {
+    const live = getLiveSessionMeta(s.id);
+    return {
+      ...s,
+      ...live
+    };
+  });
+
+  // Sort active running sessions or most recently updated sessions first
+  return result.sort((a, b) => {
+    if (a.isRunning !== b.isRunning) {
+      return a.isRunning ? -1 : 1;
+    }
+    return (b.updatedAt || '').localeCompare(a.updatedAt || '');
+  });
 }
 
 /**
  * Run a single interactive turn in `agy` via node-pty (Control Plane)
  * while tailing `transcript_full.jsonl` (Data Plane).
+ * Safe for concurrent execution across multiple sessions.
  */
 function runAgyTurn({
   prompt,
   conversationId,
+  clientTurnId = null,
   cwd = __dirname,
   approvalInput = '\r',
-  timeoutMs = 180000,
+  timeoutMs = 300000,
   onEvent = () => {}
 }) {
   return new Promise((resolve) => {
+    const turnId =
+      clientTurnId || `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const validCwd = fs.existsSync(cwd) ? cwd : __dirname;
     const tmpLogFile = path.join(
       os.tmpdir(),
@@ -552,17 +475,145 @@ function runAgyTurn({
     }
     args.push('--log-file', tmpLogFile, '--prompt-interactive', prompt);
 
-    onEvent('spawn', {
+    ensureNodePtySpawnHelperExecutable();
+    if (path.isAbsolute(AGY_BIN) && !fs.existsSync(AGY_BIN)) {
+      throw new Error(
+        `AGY binary not found at ${AGY_BIN}. Set AGY_BIN env var to the path of your agy binary.`
+      );
+    }
+
+    let activeSessionId = conversationId || null;
+    let rollingClean = '';
+    let hasStartedGenerating = false;
+    let isExiting = false;
+    let pendingEnterTimer = null;
+    let lastApproveTimestamp = 0;
+    let lastEmittedLineCount = baselineStepCount;
+    let transcriptFinalResponseDone = false;
+    let pendingAskQuestion = null;
+    let latestRawSteps = [];
+    let latestItems = [];
+    let latestTurnState = {
+      hasUnpairedToolCalls: false,
+      hasPendingBackgroundWork: false,
+      pendingBackgroundCount: 0,
+      pendingBackgroundSummary: null,
+      isLatestStepFinalPlannerResponse: false,
+      isTurnComplete: false,
+      latestActivityLabel: ''
+    };
+    let currentState = 'spawning';
+    let currentStatusMessage = activeSessionId
+      ? 'Resuming session in PTY...'
+      : 'Spawning new AGY PTY session...';
+    let updatedAt = new Date().toISOString();
+
+    const autoApprovals = [];
+    const turnPermissions = [];
+    const boundToolItemIds = new Set();
+    const subscribers = new Set([onEvent]);
+
+    function emitTurnEvent(event, payload) {
+      updatedAt = new Date().toISOString();
+      const enrichedPayload = {
+        ...payload,
+        turnId,
+        sessionId: payload.sessionId || activeSessionId || null
+      };
+      for (const sub of subscribers) {
+        try {
+          sub(event, enrichedPayload);
+        } catch (_) {}
+      }
+    }
+
+    function setTurnStatus(state, message) {
+      currentState = state;
+      currentStatusMessage = message;
+      emitTurnEvent('status', {
+        state,
+        message,
+        progressLabel: getProgressLabel()
+      });
+    }
+
+    function getProgressLabel() {
+      if (pendingAskQuestion) {
+        return `? Waiting for answer: ${pendingAskQuestion.summary || 'AskQuestion'}`;
+      }
+      const hasPendingPerm = turnPermissions.some((p) => p.status !== 'approved');
+      if (hasPendingPerm) {
+        return '↵ Auto-approving permission...';
+      }
+      if (latestTurnState.pendingBackgroundSummary) {
+        return latestTurnState.pendingBackgroundSummary;
+      }
+      if (latestTurnState.latestActivityLabel) {
+        return latestTurnState.latestActivityLabel;
+      }
+      return currentStatusMessage;
+    }
+
+    const turnController = {
+      turnId,
+      initialPrompt: prompt,
+      cwd: validCwd,
+      get sessionId() {
+        return activeSessionId;
+      },
+      get updatedAt() {
+        return updatedAt;
+      },
+      get stepCount() {
+        return latestRawSteps.length;
+      },
+      get items() {
+        return latestItems;
+      },
+      get permissions() {
+        return turnPermissions;
+      },
+      get pendingAskQuestion() {
+        return pendingAskQuestion;
+      },
+      subscribe(fn) {
+        subscribers.add(fn);
+        return () => subscribers.delete(fn);
+      },
+      getSnapshotMeta() {
+        return {
+          isRunning: !isExiting,
+          turnId,
+          state: currentState,
+          message: currentStatusMessage,
+          statusMessage: currentStatusMessage,
+          progressLabel: getProgressLabel(),
+          hasPendingQuestion: Boolean(pendingAskQuestion),
+          pendingBackgroundCount: latestTurnState.pendingBackgroundCount || 0
+        };
+      },
+      async submitAskQuestion(submission) {
+        if (!pendingAskQuestion) {
+          throw new Error('No pending ask_question in active PTY turn');
+        }
+        const currentQ = pendingAskQuestion;
+        pendingAskQuestion = null;
+        rollingClean = '';
+        setTurnStatus('answering_question', 'Submitting answer to AGY TUI...');
+        await sendAskQuestionKeystrokes(ptyProcess, currentQ.questions, submission);
+        emitTurnEvent('ask_question_submitted', {
+          stepIndex: currentQ.stepIndex,
+          submission
+        });
+      }
+    };
+
+    emitTurnEvent('spawn', {
       command: AGY_BIN,
       args,
       cwd: validCwd,
       env: { GOOGLE_CLOUD_PROJECT: GCP_PROJECT }
     });
-
-    ensureNodePtySpawnHelperExecutable();
-    if (path.isAbsolute(AGY_BIN) && !fs.existsSync(AGY_BIN)) {
-      throw new Error(`AGY binary not found at ${AGY_BIN}. Set AGY_BIN env var to the path of your agy binary.`);
-    }
 
     const ptyProcess = pty.spawn(AGY_BIN, args, {
       name: 'xterm-256color',
@@ -577,121 +628,24 @@ function runAgyTurn({
       }
     });
 
-    let activeSessionId = conversationId || null;
-    let rollingClean = '';
-    let hasStartedGenerating = false;
-    let isExiting = false;
-    let pendingEnterTimer = null;
-    let lastApproveTimestamp = 0;
-    let lastEmittedLineCount = baselineStepCount;
-    let transcriptFinalResponseDone = false;
-    let pendingAskQuestion = null;
-    const autoApprovals = [];
-
-    const turnController = {
-      get sessionId() {
-        return activeSessionId;
-      },
-      get pendingAskQuestion() {
-        return pendingAskQuestion;
-      },
-      async submitAskQuestion(submission) {
-        if (!pendingAskQuestion) {
-          throw new Error('No pending ask_question in active PTY turn');
-        }
-        const currentQ = pendingAskQuestion;
-        pendingAskQuestion = null;
-        rollingClean = '';
-        onEvent('status', {
-          state: 'answering_question',
-          message: 'Submitting answer to AGY TUI...'
-        });
-        await sendAskQuestionKeystrokes(ptyProcess, currentQ.questions, submission);
-        onEvent('ask_question_submitted', {
-          stepIndex: currentQ.stepIndex,
-          submission
-        });
-      }
-    };
-
-    latestActiveTurn = turnController;
+    activeTurnsByTurnId.set(turnId, turnController);
     if (activeSessionId) {
       activeTurns.set(activeSessionId, turnController);
     }
 
-    function syncTranscript() {
-      if (!activeSessionId) return;
-      const tPath = getTranscriptPath(activeSessionId);
-      if (!tPath) return;
-      try {
-        const content = fs.readFileSync(tPath, 'utf8');
-        const lines = content.split(/\r?\n/).filter(Boolean);
-        if (lines.length > lastEmittedLineCount) {
-          lastEmittedLineCount = lines.length;
-          const { rawSteps, items } = parseTranscriptLines(lines);
-          onEvent('transcript', {
-            sessionId: activeSessionId,
-            items,
-            stepCount: rawSteps.length
-          });
-
-          const latestStep = rawSteps[rawSteps.length - 1];
-
-          // Check if latest step is an unanswered ask_question tool call
-          const askCall =
-            latestStep &&
-            latestStep.step_index >= baselineStepCount &&
-            latestStep.type === 'PLANNER_RESPONSE' &&
-            Array.isArray(latestStep.tool_calls)
-              ? latestStep.tool_calls.find((tc) => tc.name === 'ask_question')
-              : null;
-
-          if (askCall) {
-            let askArgs = askCall.args || {};
-            if (typeof askArgs === 'string') {
-              try {
-                askArgs = JSON.parse(askArgs);
-              } catch (_) {}
-            }
-            if (!pendingAskQuestion || pendingAskQuestion.stepIndex !== latestStep.step_index) {
-              pendingAskQuestion = {
-                sessionId: activeSessionId,
-                stepIndex: latestStep.step_index,
-                questions: Array.isArray(askArgs.questions) ? askArgs.questions : [],
-                summary: askArgs.toolAction || askArgs.toolSummary || 'Question from Antigravity'
-              };
-              onEvent('ask_question', pendingAskQuestion);
-              onEvent('status', {
-                state: 'waiting_for_question',
-                message: 'Waiting for your answer in AskQuestion...'
-              });
-            }
-          } else if (latestStep && latestStep.type === 'GENERIC') {
-            pendingAskQuestion = null;
-          }
-
-          // Check if the latest step is a completed PLANNER_RESPONSE with NO tool_calls
-          if (
-            latestStep &&
-            latestStep.step_index >= baselineStepCount &&
-            latestStep.type === 'PLANNER_RESPONSE' &&
-            latestStep.status === 'DONE' &&
-            (!Array.isArray(latestStep.tool_calls) || latestStep.tool_calls.length === 0)
-          ) {
-            transcriptFinalResponseDone = true;
-            if (!isExiting && !pendingEnterTimer && !pendingAskQuestion) {
-              triggerGracefulExit(
-                'Turn complete (final PLANNER_RESPONSE DONE in transcript); exiting PTY via Ctrl+D x2'
-              );
-            }
-          } else {
-            transcriptFinalResponseDone = false;
-          }
+    function attachTurnPermissionsToSession(sessionId) {
+      if (!sessionId) return;
+      const list = sessionPermissions.get(sessionId) || [];
+      for (const perm of turnPermissions) {
+        perm.sessionId = sessionId;
+        if (!list.some((existing) => existing.id === perm.id)) {
+          list.push(perm);
         }
-      } catch (_) {}
+      }
+      sessionPermissions.set(sessionId, list);
     }
 
-    const pollTimer = setInterval(() => {
+    function resolveSessionIdFromLog() {
       if (!activeSessionId && fs.existsSync(tmpLogFile)) {
         try {
           const logContent = fs.readFileSync(tmpLogFile, 'utf8');
@@ -701,17 +655,165 @@ function runAgyTurn({
           if (match && match[1]) {
             activeSessionId = match[1];
             activeTurns.set(activeSessionId, turnController);
-            onEvent('session', { sessionId: activeSessionId, source: 'log-file' });
+            attachTurnPermissionsToSession(activeSessionId);
+            emitTurnEvent('session', { sessionId: activeSessionId, source: 'log-file' });
           }
         } catch (_) {}
       }
+    }
+
+    function findMatchingToolItem(items, check, minStepIndex = baselineStepCount) {
+      const effectiveMinStep = Math.max(baselineStepCount, minStepIndex ?? baselineStepCount);
+      const turnTools = (items || []).filter(
+        (item) => item.role === 'tool_call' && item.stepIndex >= effectiveMinStep
+      );
+      if (turnTools.length === 0) return null;
+
+      const unbound = turnTools.filter((t) => !boundToolItemIds.has(t.id));
+      const pool = unbound.length > 0 ? unbound : turnTools;
+      const running = pool.filter((t) => t.status === 'running');
+      const candidates = running.length > 0 ? running : pool;
+
+      const targetLower = String(check.target || '').trim().toLowerCase();
+      const haystack = `${check.target || ''}\n${check.snippet || ''}`.toLowerCase();
+      if (targetLower || haystack.trim()) {
+        const byDetail = candidates.find((t) => {
+          const detail = String(t.detail || '').trim().toLowerCase();
+          const argsStr = JSON.stringify(t.args || {}).toLowerCase();
+          if (targetLower && (detail.includes(targetLower) || argsStr.includes(targetLower))) {
+            return true;
+          }
+          return Boolean(detail && haystack.includes(detail));
+        });
+        if (byDetail) return byDetail;
+      }
+
+      const byBypass = candidates.find((t) => t.bypassSandbox);
+      if (byBypass) return byBypass;
+
+      return candidates[0] || turnTools[turnTools.length - 1];
+    }
+
+    function bindPendingPermissions(items) {
+      for (const perm of turnPermissions) {
+        if (!perm.afterItemId && !perm.isWorkspaceTrust) {
+          const matchedTool = findMatchingToolItem(items, perm, perm.minToolStepIndex);
+          if (matchedTool) {
+            perm.afterItemId = matchedTool.id;
+            perm.afterStepIndex = matchedTool.stepIndex;
+            boundToolItemIds.add(matchedTool.id);
+            emitTurnEvent(
+              perm.status === 'approved' ? 'enter_simulated' : 'permission_prompt',
+              perm
+            );
+          }
+        }
+      }
+    }
+
+    function syncTranscript(force = false) {
+      resolveSessionIdFromLog();
+      if (!activeSessionId) return;
+      const tPath = getTranscriptPath(activeSessionId);
+      if (!tPath) return;
+      try {
+        const content = fs.readFileSync(tPath, 'utf8');
+        const lines = content.split(/\r?\n/).filter(Boolean);
+        const hasNewLines = lines.length > lastEmittedLineCount;
+        if (hasNewLines || force) {
+          const { rawSteps, items, turnState } = parseTranscriptLines(lines, {
+            baselineStepCount,
+            brainDirs: BRAIN_DIRS
+          });
+          latestRawSteps = rawSteps;
+          latestItems = items;
+          latestTurnState = turnState;
+          bindPendingPermissions(items);
+
+          if (hasNewLines) {
+            lastEmittedLineCount = lines.length;
+            emitTurnEvent('transcript', {
+              sessionId: activeSessionId,
+              items,
+              stepCount: rawSteps.length,
+              turnState,
+              progressLabel: getProgressLabel()
+            });
+
+            const latestStep = rawSteps[rawSteps.length - 1];
+
+            // Check if latest step is an unanswered ask_question tool call
+            const askCall =
+              latestStep &&
+              latestStep.step_index >= baselineStepCount &&
+              latestStep.type === 'PLANNER_RESPONSE' &&
+              Array.isArray(latestStep.tool_calls)
+                ? latestStep.tool_calls.find((tc) => tc.name === 'ask_question')
+                : null;
+
+            if (askCall) {
+              let askArgs = askCall.args || {};
+              if (typeof askArgs === 'string') {
+                try {
+                  askArgs = JSON.parse(askArgs);
+                } catch (_) {}
+              }
+              if (!pendingAskQuestion || pendingAskQuestion.stepIndex !== latestStep.step_index) {
+                pendingAskQuestion = {
+                  sessionId: activeSessionId,
+                  stepIndex: latestStep.step_index,
+                  questions: Array.isArray(askArgs.questions) ? askArgs.questions : [],
+                  summary: askArgs.toolAction || askArgs.toolSummary || 'Question from Antigravity'
+                };
+                emitTurnEvent('ask_question', pendingAskQuestion);
+                setTurnStatus(
+                  'waiting_for_question',
+                  'Waiting for your answer in AskQuestion...'
+                );
+              }
+            } else if (latestStep && latestStep.type === 'GENERIC') {
+              pendingAskQuestion = null;
+            }
+
+            // Evaluate turn completion with background task / subagent / timer awareness (gemini-work#49)
+            if (turnState.isTurnComplete) {
+              transcriptFinalResponseDone = true;
+              if (!isExiting && !pendingEnterTimer && !pendingAskQuestion) {
+                triggerGracefulExit(
+                  'Turn complete (final PLANNER_RESPONSE DONE and no pending background work); exiting PTY via Ctrl+D x2'
+                );
+              }
+            } else {
+              transcriptFinalResponseDone = false;
+              if (
+                turnState.isLatestStepFinalPlannerResponse &&
+                turnState.hasPendingBackgroundWork &&
+                !pendingAskQuestion
+              ) {
+                setTurnStatus(
+                  'waiting_for_background',
+                  turnState.pendingBackgroundSummary || 'Waiting for background tasks to finish...'
+                );
+              } else if (!pendingAskQuestion && hasStartedGenerating) {
+                setTurnStatus(
+                  'generating',
+                  turnState.latestActivityLabel || 'AGY is thinking & executing...'
+                );
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    const pollTimer = setInterval(() => {
       syncTranscript();
     }, 150);
 
     const safetyTimeout = setTimeout(() => {
       if (!isExiting) {
         isExiting = true;
-        onEvent('status', { state: 'timeout', message: 'Turn timeout reached; sending Ctrl+D x2' });
+        setTurnStatus('timeout', 'Turn timeout reached; sending Ctrl+D x2');
         ptyProcess.write('\x04\x04');
         setTimeout(() => {
           try {
@@ -724,8 +826,8 @@ function runAgyTurn({
     function triggerGracefulExit(reason) {
       if (isExiting) return;
       isExiting = true;
-      syncTranscript();
-      onEvent('status', { state: 'completing', message: reason });
+      syncTranscript(true);
+      setTurnStatus('completing', reason);
 
       setTimeout(() => {
         ptyProcess.write('\x04');
@@ -752,7 +854,7 @@ function runAgyTurn({
         (rollingClean.includes('esc to cancel') || rollingClean.includes('Generating'))
       ) {
         hasStartedGenerating = true;
-        onEvent('status', { state: 'generating', message: 'AGY is thinking & executing...' });
+        setTurnStatus('generating', 'AGY is thinking & executing...');
       }
 
       // 2. Detect TUI permission prompt and simulate hitting Enter (\r)
@@ -764,11 +866,39 @@ function runAgyTurn({
           lastApproveTimestamp = now;
           rollingClean = '';
 
-          const permId = `perm-${Date.now()}`;
+          // Sync transcript immediately so latest tool_call items are available before computing placement
+          syncTranscript(true);
+
+          const isWorkspaceTrust = /Workspace trust|trust this folder/i.test(
+            `${check.title || ''} ${check.snippet || ''}`
+          );
+          const latestStep =
+            latestRawSteps.length > 0 ? latestRawSteps[latestRawSteps.length - 1] : null;
+          const latestStepIdx = latestStep
+            ? latestStep.step_index
+            : Math.max(0, baselineStepCount);
+          const minToolStepIndex = !latestStep
+            ? baselineStepCount
+            : latestStep.type === 'PLANNER_RESPONSE'
+              ? latestStep.step_index
+              : latestStep.step_index + 1;
+
+          const matchedTool = isWorkspaceTrust
+            ? null
+            : findMatchingToolItem(latestItems, check, minToolStepIndex);
+          if (matchedTool) {
+            boundToolItemIds.add(matchedTool.id);
+          }
+
+          const permId = `perm-${Date.now()}-${turnPermissions.length}`;
           const promptRecord = {
             id: permId,
             sessionId: activeSessionId,
-            afterStepIndex: Math.max(0, lastEmittedLineCount - 1),
+            afterItemId: matchedTool ? matchedTool.id : null,
+            afterStepIndex: matchedTool ? matchedTool.stepIndex : latestStepIdx,
+            minToolStepIndex,
+            turnStartStepIndex: baselineStepCount,
+            isWorkspaceTrust,
             title: check.title,
             target: check.target,
             reason: check.reason,
@@ -781,26 +911,29 @@ function runAgyTurn({
             keySent: approvalInput
           };
 
+          turnPermissions.push(promptRecord);
           if (activeSessionId) {
-            const list = sessionPermissions.get(activeSessionId) || [];
-            list.push(promptRecord);
-            sessionPermissions.set(activeSessionId, list);
+            attachTurnPermissionsToSession(activeSessionId);
           }
 
-          onEvent('permission_prompt', promptRecord);
+          emitTurnEvent('permission_prompt', promptRecord);
+          setTurnStatus('permission_prompt', `Auto-approving: ${check.title}...`);
 
           pendingEnterTimer = setTimeout(() => {
             pendingEnterTimer = null;
             ptyProcess.write(approvalInput);
             promptRecord.status = 'approved';
             promptRecord.approvedAt = new Date().toISOString();
+            syncTranscript(true);
             autoApprovals.push(promptRecord);
-            onEvent('enter_simulated', promptRecord);
+            emitTurnEvent('enter_simulated', promptRecord);
+            setTurnStatus('generating', 'Simulated Enter (\\r) sent · Resuming execution...');
           }, 350);
         }
       }
 
-      // 3. Detect turn completion: footer returns to `? for shortcuts` after generation
+      // 3. Detect turn completion when TUI returns to `? for shortcuts` after generation
+      // Gated by `analyzeTurnState`: never exit while background tasks/subagents/timers are pending!
       if (
         hasStartedGenerating &&
         !isExiting &&
@@ -808,7 +941,17 @@ function runAgyTurn({
         !pendingAskQuestion &&
         (clean.includes('? for shortcuts') || transcriptFinalResponseDone)
       ) {
-        triggerGracefulExit('Turn idle ("? for shortcuts" detected); exiting PTY via Ctrl+D x2');
+        resolveSessionIdFromLog();
+        syncTranscript(true);
+
+        if (transcriptFinalResponseDone) {
+          triggerGracefulExit('Turn idle ("? for shortcuts" detected); exiting PTY via Ctrl+D x2');
+        } else if (latestTurnState.hasPendingBackgroundWork) {
+          setTurnStatus(
+            'waiting_for_background',
+            latestTurnState.pendingBackgroundSummary || 'Waiting for background tasks to finish...'
+          );
+        }
       }
 
       // 4. Backup conversation ID capture from exit banner
@@ -816,7 +959,8 @@ function runAgyTurn({
       if (resumeMatch && resumeMatch[1] && !activeSessionId) {
         activeSessionId = resumeMatch[1];
         activeTurns.set(activeSessionId, turnController);
-        onEvent('session', { sessionId: activeSessionId, source: 'exit-banner' });
+        attachTurnPermissionsToSession(activeSessionId);
+        emitTurnEvent('session', { sessionId: activeSessionId, source: 'exit-banner' });
       }
     });
 
@@ -825,14 +969,15 @@ function runAgyTurn({
       clearTimeout(safetyTimeout);
       if (pendingEnterTimer) clearTimeout(pendingEnterTimer);
 
-      if (activeSessionId) {
+      isExiting = true;
+      currentState = 'idle';
+
+      activeTurnsByTurnId.delete(turnId);
+      if (activeSessionId && activeTurns.get(activeSessionId) === turnController) {
         activeTurns.delete(activeSessionId);
       }
-      if (latestActiveTurn === turnController) {
-        latestActiveTurn = null;
-      }
 
-      syncTranscript();
+      syncTranscript(true);
 
       try {
         if (fs.existsSync(tmpLogFile)) fs.unlinkSync(tmpLogFile);
@@ -843,15 +988,17 @@ function runAgyTurn({
         : { sessionId: null, items: [], permissions: autoApprovals };
 
       const result = {
+        turnId,
         sessionId: activeSessionId,
         exitCode,
         signal,
         autoApprovalsCount: autoApprovals.length,
         autoApprovals,
-        items: finalConversation.items
+        items: finalConversation.items,
+        permissions: finalConversation.permissions
       };
 
-      onEvent('exit', result);
+      emitTurnEvent('exit', result);
       resolve(result);
     });
   });
@@ -864,16 +1011,19 @@ function runAgyTurn({
 app.get('/api/workspaces', (req, res) => {
   const home = os.homedir();
   const projectsDir = path.join(home, 'Projects');
-  const presets = new Set([__dirname, projectsDir, home]);
+  const lowerProjectsDir = path.join(home, 'projects');
+  const presets = new Set([__dirname, projectsDir, lowerProjectsDir, home]);
 
-  if (fs.existsSync(projectsDir)) {
-    try {
-      for (const entry of fs.readdirSync(projectsDir, { withFileTypes: true })) {
-        if (entry.isDirectory() && !entry.name.startsWith('.')) {
-          presets.add(path.join(projectsDir, entry.name));
+  for (const dir of [projectsDir, lowerProjectsDir]) {
+    if (fs.existsSync(dir)) {
+      try {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (entry.isDirectory() && !entry.name.startsWith('.')) {
+            presets.add(path.join(dir, entry.name));
+          }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
   }
 
   for (const s of listSessions()) {
@@ -884,13 +1034,13 @@ app.get('/api/workspaces', (req, res) => {
 
   res.json({
     defaultWorkspace: __dirname,
-    workspaces: Array.from(presets)
+    workspaces: Array.from(presets).filter((p) => fs.existsSync(p))
   });
 });
 
 /**
  * GET /api/sessions
- * Returns historical `agy` sessions from `~/.gemini/antigravity-cli`.
+ * Returns historical and active `agy` sessions with live progress metadata.
  */
 app.get('/api/sessions', (req, res) => {
   res.json({ sessions: listSessions() });
@@ -898,24 +1048,87 @@ app.get('/api/sessions', (req, res) => {
 
 /**
  * GET /api/sessions/:id
- * Returns parsed messages, muted tool calls, thoughts, ask_question items, and permission cards.
+ * Returns parsed messages, muted tool calls, thoughts, ask_question items, permission cards, and live status.
  */
 app.get('/api/sessions/:id', (req, res) => {
-  const data = readConversation(req.params.id);
+  const sessionId = req.params.id;
+  const data = readConversation(sessionId);
+  if (
+    !data.transcriptPath &&
+    !activeTurns.has(sessionId) &&
+    !activeTurnsByTurnId.has(sessionId)
+  ) {
+    return res.status(404).json({
+      ...data,
+      error: `Session "${sessionId}" not found`
+    });
+  }
   res.json(data);
 });
 
 /**
+ * GET /api/sessions/:id/stream
+ * Attach an SSE listener to an already-running session turn (e.g. after switching sessions or reloading).
+ */
+app.get('/api/sessions/:id/stream', (req, res) => {
+  const sessionId = req.params.id;
+  const controller = activeTurns.get(sessionId) || activeTurnsByTurnId.get(sessionId);
+  if (!controller) {
+    return res.status(404).json({ error: `No active turn running for session "${sessionId}"` });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const sendSse = (event, data) => {
+    if (!res.writableEnded) {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      if (event === 'exit') {
+        res.end();
+      }
+    }
+  };
+
+  // Send immediate snapshot
+  sendSse('status', controller.getSnapshotMeta());
+  if (controller.items.length > 0) {
+    sendSse('transcript', {
+      sessionId: controller.sessionId,
+      items: controller.items,
+      stepCount: controller.stepCount,
+      progressLabel: controller.getSnapshotMeta().progressLabel
+    });
+  }
+  if (controller.pendingAskQuestion) {
+    sendSse('ask_question', controller.pendingAskQuestion);
+  }
+
+  const unsubscribe = controller.subscribe(sendSse);
+  req.on('close', () => {
+    unsubscribe();
+  });
+});
+
+/**
  * POST /api/ask-question
- * Submits user's selected option(s) / write-in text / skip action to the active PTY turn.
+ * Submits user's selected option(s) / write-in text / skip action to the target session's active PTY turn.
  */
 app.post('/api/ask-question', async (req, res) => {
-  const { sessionId, action = 'submit', answers = [] } = req.body || {};
-  const controller = (sessionId && activeTurns.get(sessionId)) || latestActiveTurn;
+  const { sessionId, turnId, action = 'submit', answers = [] } = req.body || {};
+  let controller = null;
+  if (sessionId && activeTurns.has(sessionId)) {
+    controller = activeTurns.get(sessionId);
+  } else if (turnId && activeTurnsByTurnId.has(turnId)) {
+    controller = activeTurnsByTurnId.get(turnId);
+  } else if (!sessionId && !turnId && activeTurnsByTurnId.size === 1) {
+    controller = activeTurnsByTurnId.values().next().value;
+  }
 
   if (!controller || !controller.pendingAskQuestion) {
     return res.status(409).json({
-      error: 'No active PTY turn is currently waiting on ask_question',
+      error: 'No active PTY turn for this session is currently waiting on ask_question',
       canResumeAsPrompt: true
     });
   }
@@ -931,12 +1144,14 @@ app.post('/api/ask-question', async (req, res) => {
 /**
  * POST /api/chat
  * Streams SSE events (`session`, `status`, `transcript`, `ask_question`, `permission_prompt`, `enter_simulated`, `exit`).
+ * Supports multiple concurrent turns across different sessions.
  */
 app.post('/api/chat', async (req, res) => {
   const {
     prompt,
     sessionId,
     conversationId,
+    clientTurnId = null,
     cwd = __dirname,
     approvalInput = '\r'
   } = req.body || {};
@@ -946,6 +1161,16 @@ app.post('/api/chat', async (req, res) => {
   }
 
   const targetSessionId = sessionId || conversationId || null;
+  if (targetSessionId && activeTurns.has(targetSessionId)) {
+    return res.status(409).json({
+      error: `Session "${targetSessionId}" already has a turn in progress.`
+    });
+  }
+  if (clientTurnId && activeTurnsByTurnId.has(clientTurnId)) {
+    return res.status(409).json({
+      error: `Turn "${clientTurnId}" is already in progress.`
+    });
+  }
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -962,6 +1187,7 @@ app.post('/api/chat', async (req, res) => {
     await runAgyTurn({
       prompt,
       conversationId: targetSessionId,
+      clientTurnId,
       cwd,
       approvalInput,
       onEvent: sendSse
