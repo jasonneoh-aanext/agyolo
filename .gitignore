@@ -1,12 +1,37 @@
-# Dependencies
+# Node dependencies & package caches
 node_modules/
+jspm_packages/
+.npm/
+.pnpm-store/
+.yarn/
+*.tgz
+
+# Build outputs & app bundles
+dist/
+build/
+out/
+*.app/
+*.dmg
+*.pkg
+
+# Cargo / Rust / Tauri build artifacts
+target/
+**/target/
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/WixTools/
+**/*.rs.bk
+*.pdb
+*.dSYM/
 
 # Logs
-logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
 # Environment variables
 .env
@@ -15,6 +40,8 @@ yarn-error.log*
 
 # OS generated files
 .DS_Store
+.AppleDouble
+.LSOverride
 Thumbs.db
 
 # IDE / Editor directories
@@ -22,8 +49,4 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
-
-# Rust / Tauri build artifacts
-src-tauri/target/
-dist/
-
+*~
