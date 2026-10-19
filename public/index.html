@@ -38,11 +38,6 @@
         <input id="cwdInput" class="path-input" list="workspacePresets" placeholder="/Users/jason/projects/..." />
         <datalist id="workspacePresets"></datalist>
       </div>
-
-      <!-- New Session Button -->
-      <button id="newSessionBtn" class="btn-new" type="button">
-        <span>+ New Session</span>
-      </button>
     </div>
   </header>
 
@@ -55,7 +50,20 @@
           <span id="sidebarCount" class="sidebar-count">0</span>
         </div>
       </div>
-      <div id="sidebarList" class="sidebar-list"></div>
+      <div class="sidebar-body">
+        <button
+          id="newSessionBtn"
+          class="session-item btn-new active"
+          type="button"
+          data-session-key="__new__"
+        >
+          <div class="session-item-top">
+            <span class="btn-new-icon">+</span>
+            <span class="session-item-title">New Session</span>
+          </div>
+        </button>
+        <div id="sidebarList" class="sidebar-list"></div>
+      </div>
     </aside>
 
     <div class="main-column">

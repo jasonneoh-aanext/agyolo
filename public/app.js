@@ -43,6 +43,7 @@ function createSessionState(key, overrides = {}) {
     permissions: [],
     stepCount: 0,
     updatedAt: new Date().toISOString(),
+    createdLocally: false,
     isRunning: false,
     statusState: 'idle',
     statusMessage: key === NEW_SESSION_KEY ? 'New Session · Ready' : 'Idle · Ready',
@@ -173,47 +174,44 @@ function syncComposerAndStatusBar() {
 }
 
 function renderSidebar() {
-  // Combine in-flight provisional turns (not yet bound to a sessionId) + knownSessions
+  if (newSessionBtn) {
+    const isNewSessionActive = activeViewKey === NEW_SESSION_KEY;
+    newSessionBtn.classList.toggle('active', isNewSessionActive);
+    newSessionBtn.setAttribute('aria-current', isNewSessionActive ? 'true' : 'false');
+  }
+
+  // Combine in-flight provisional/running turns (not yet in knownSessions) + knownSessions
   const displayEntries = [];
   const seenSessionIds = new Set();
+  const knownSessionIdSet = new Set(knownSessions.map((s) => s.id));
 
-  // 1. Always show "+ New Session (Draft)" item if currently selected or has draft text
-  const newDraftState = sessionStates.get(NEW_SESSION_KEY);
-  if (activeViewKey === NEW_SESSION_KEY || (newDraftState && newDraftState.draftPrompt.trim())) {
+  // 1. Include any newly started turns (after first message sent) not yet in knownSessions at the top
+  const inFlightStates = Array.from(sessionStates.entries())
+    .filter(
+      ([key, st]) =>
+        key !== NEW_SESSION_KEY &&
+        !knownSessionIdSet.has(key) &&
+        ((key.startsWith('turn-') && !st.sessionId) || st.isRunning || st.createdLocally)
+    )
+    .sort(([, a], [, b]) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+
+  for (const [key, st] of inFlightStates) {
+    seenSessionIds.add(key);
     displayEntries.push({
-      key: NEW_SESSION_KEY,
-      sessionId: null,
-      title: 'New Session (Draft)',
-      shortId: 'new',
-      workspace: (newDraftState && newDraftState.workspace) || cwdInput.value.trim(),
-      stepCount: 0,
-      isRunning: false,
-      hasPendingQuestion: false,
-      statusState: 'idle',
-      progressLabel: ''
+      key,
+      sessionId: st.sessionId || null,
+      title: st.title || 'Starting New Session...',
+      shortId: st.sessionId ? st.sessionId.slice(0, 8) : 'spawning',
+      workspace: st.workspace || '',
+      stepCount: st.stepCount || st.items.length,
+      isRunning: st.isRunning,
+      hasPendingQuestion: st.hasPendingQuestion,
+      statusState: st.statusState,
+      progressLabel: st.progressLabel || st.statusMessage
     });
   }
 
-  // 2. Include any provisional turns that haven't resolved a sessionId yet
-  for (const [key, st] of sessionStates.entries()) {
-    if (key.startsWith('turn-') && !st.sessionId) {
-      seenSessionIds.add(key);
-      displayEntries.push({
-        key,
-        sessionId: null,
-        title: st.title || 'Starting New Session...',
-        shortId: 'spawning',
-        workspace: st.workspace || '',
-        stepCount: st.items.length,
-        isRunning: st.isRunning,
-        hasPendingQuestion: st.hasPendingQuestion,
-        statusState: st.statusState,
-        progressLabel: st.progressLabel || st.statusMessage
-      });
-    }
-  }
-
-  // 3. Merge server-known sessions with local sessionStates
+  // 2. Merge server-known sessions with local sessionStates
   for (const s of knownSessions) {
     if (seenSessionIds.has(s.id)) continue;
     seenSessionIds.add(s.id);
@@ -248,7 +246,7 @@ function renderSidebar() {
     });
   }
 
-  // 4. Include any locally loaded session not in top 50 knownSessions
+  // 3. Include any locally loaded session not in top 50 knownSessions
   for (const [key, st] of sessionStates.entries()) {
     if (
       key !== NEW_SESSION_KEY &&
@@ -309,8 +307,7 @@ function renderSidebar() {
       }
 
       const wsShort = formatWorkspaceShort(entry.workspace);
-      const stepsLabel =
-        entry.key === NEW_SESSION_KEY ? 'Draft' : `${entry.stepCount || 0} steps`;
+      const stepsLabel = `${entry.stepCount || 0} steps`;
 
       const progressHtml =
         entry.isRunning || entry.hasPendingQuestion
@@ -330,6 +327,7 @@ function renderSidebar() {
         <button
           type="button"
           class="${classes}"
+          aria-current="${isActive ? 'true' : 'false'}"
           data-session-key="${escapeHtml(entry.key)}"
           onclick="selectSessionFromSidebar('${escapeHtml(entry.key)}')"
         >
@@ -1393,6 +1391,7 @@ async function sendChat() {
       turnId: clientTurnId,
       title: prompt.slice(0, 60),
       workspace: cwd,
+      createdLocally: true,
       items: []
     });
     sessionStates.set(clientTurnId, targetState);
@@ -1403,6 +1402,7 @@ async function sendChat() {
 
   targetState.sessionError = null;
   targetState.isRunning = true;
+  targetState.updatedAt = new Date().toISOString();
   targetState.turnId = clientTurnId;
   targetState.workspace = cwd;
   targetState.statusState = 'running';
@@ -1471,7 +1471,7 @@ sidebarToggleBtn.addEventListener('click', () => {
 });
 
 newSessionBtn.addEventListener('click', () => {
-  loadSession(null);
+  selectSessionFromSidebar(NEW_SESSION_KEY);
 });
 
 sendBtn.addEventListener('click', sendChat);
@@ -1503,6 +1503,10 @@ setInterval(() => {
 
 (async () => {
   const initialSessionId = getSessionParamFromUrl();
+  if (initialSessionId) {
+    activeViewKey = initialSessionId;
+    renderSidebar();
+  }
   await loadWorkspaces();
   await refreshSessionList();
   if (initialSessionId) {

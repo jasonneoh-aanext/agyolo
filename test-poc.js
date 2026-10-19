@@ -279,6 +279,277 @@ function runTurnStateUnitTests() {
   console.log('   -> Passed all Turn & Background Lifecycle assertions!');
 }
 
+async function runSidebarNewSessionTests(indexHtml, appJs) {
+  console.log('4. Running Sidebar New Session Button & Placeholder Lifecycle Tests (agyolo#5)...');
+  const vm = require('vm');
+
+  // Verify #newSessionBtn is inside #sidebar and before #sidebarList, not inside .topbar
+  const topbarMatch = indexHtml.match(/<header class="topbar">([\s\S]*?)<\/header>/);
+  assert.ok(topbarMatch, 'Should have topbar header');
+  assert.ok(
+    !topbarMatch[1].includes('id="newSessionBtn"'),
+    '#newSessionBtn should no longer be inside .topbar'
+  );
+
+  const sidebarMatch = indexHtml.match(/<aside id="sidebar"[\s\S]*?<\/aside>/);
+  assert.ok(sidebarMatch, 'Should have #sidebar aside');
+  const newBtnPos = sidebarMatch[0].indexOf('id="newSessionBtn"');
+  const listPos = sidebarMatch[0].indexOf('id="sidebarList"');
+  assert.ok(newBtnPos > -1, '#newSessionBtn should be inside #sidebar');
+  assert.ok(
+    newBtnPos < listPos,
+    '#newSessionBtn should be placed at the top of the session list before #sidebarList'
+  );
+
+  // Create lightweight DOM harness to test app.js behavior
+  function makeEl(id, initialClasses = []) {
+    const classes = new Set(initialClasses);
+    const attrs = new Map();
+    const listeners = new Map();
+    return {
+      id,
+      value: '',
+      innerHTML: '',
+      textContent: '',
+      disabled: false,
+      scrollTop: 0,
+      scrollHeight: 100,
+      className: initialClasses.join(' '),
+      classList: {
+        add: (c) => classes.add(c),
+        remove: (c) => classes.delete(c),
+        toggle: (c, force) => {
+          const shouldHave = force !== undefined ? Boolean(force) : !classes.has(c);
+          if (shouldHave) classes.add(c);
+          else classes.delete(c);
+          return shouldHave;
+        },
+        contains: (c) => classes.has(c)
+      },
+      setAttribute: (k, v) => attrs.set(k, String(v)),
+      getAttribute: (k) => attrs.get(k),
+      addEventListener: (evt, fn) => {
+        if (!listeners.has(evt)) listeners.set(evt, []);
+        listeners.get(evt).push(fn);
+      },
+      trigger: async (evt, eventObj = {}) => {
+        for (const fn of listeners.get(evt) || []) {
+          await fn(eventObj);
+        }
+      },
+      focus: () => {}
+    };
+  }
+
+  const elements = {
+    stream: makeEl('stream'),
+    viewport: makeEl('viewport'),
+    sidebar: makeEl('sidebar', ['sidebar']),
+    sidebarToggleBtn: makeEl('sidebarToggleBtn'),
+    sidebarList: makeEl('sidebarList', ['sidebar-list']),
+    sidebarCount: makeEl('sidebarCount'),
+    activeRunsBadge: makeEl('activeRunsBadge'),
+    activeRunsText: makeEl('activeRunsText'),
+    cwdInput: makeEl('cwdInput'),
+    workspacePresets: makeEl('workspacePresets'),
+    newSessionBtn: makeEl('newSessionBtn', ['session-item', 'btn-new', 'active']),
+    promptInput: makeEl('promptInput'),
+    sendBtn: makeEl('sendBtn'),
+    statusDot: makeEl('statusDot'),
+    statusText: makeEl('statusText')
+  };
+
+  let chatPosted = false;
+  const mockSessions = [
+    {
+      id: 'existing-session-1111',
+      title: 'Existing First Session',
+      workspace: '/Users/jason/projects/agyolo',
+      stepCount: 4,
+      updatedAt: '2026-10-18T10:00:00.000Z',
+      isRunning: false,
+      state: 'idle'
+    }
+  ];
+
+  const sandbox = {
+    URL,
+    URLSearchParams,
+    TextDecoder,
+    console,
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    setInterval: () => 1,
+    clearInterval: () => {},
+    window: {
+      location: { href: 'http://localhost:3000/', search: '' },
+      history: { replaceState: () => {} },
+      addEventListener: () => {},
+      getSelection: () => ''
+    },
+    document: {
+      getElementById: (id) => elements[id] || makeEl(id)
+    },
+    fetch: async (url) => {
+      if (url === '/api/workspaces') {
+        return {
+          ok: true,
+          json: async () => ({
+            defaultWorkspace: '/Users/jason/projects/agyolo',
+            workspaces: ['/Users/jason/projects/agyolo']
+          })
+        };
+      }
+      if (url === '/api/sessions') {
+        return {
+          ok: true,
+          json: async () => ({ sessions: mockSessions })
+        };
+      }
+      if (url.startsWith('/api/sessions/existing-session-1111')) {
+        return {
+          ok: true,
+          json: async () => ({
+            sessionId: 'existing-session-1111',
+            transcriptPath: '/mock/transcript.jsonl',
+            workspace: '/Users/jason/projects/agyolo',
+            items: [{ id: 'u1', role: 'user', content: 'Hello existing' }],
+            rawSteps: [{}],
+            permissions: [],
+            isRunning: false
+          })
+        };
+      }
+      if (url === '/api/chat') {
+        chatPosted = true;
+        // Return a stream that stays open briefly so we can inspect the sidebar state right after first message is sent
+        return {
+          ok: true,
+          body: {
+            getReader: () => ({
+              read: async () => ({ done: true, value: undefined })
+            })
+          }
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    }
+  };
+
+  vm.createContext(sandbox);
+  vm.runInContext(appJs, sandbox);
+  // Wait for startup IIFE promises to settle
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+
+  // Initial state: New Session button is highlighted, sidebarList only contains the 1 existing session (no extra draft item)
+  assert.strictEqual(
+    elements.newSessionBtn.classList.contains('active'),
+    true,
+    '#newSessionBtn should be highlighted on initial New Session state'
+  );
+  assert.strictEqual(
+    elements.sidebarCount.textContent,
+    '1',
+    'Sidebar count should only count actual sessions, not the New Session button placeholder'
+  );
+  assert.ok(
+    !elements.sidebarList.innerHTML.includes('New Session (Draft)'),
+    '#sidebarList should not render a separate New Session (Draft) card'
+  );
+  assert.ok(
+    !elements.sidebarList.innerHTML.includes('class="session-item active"'),
+    'Existing session should not be highlighted while New Session button is active'
+  );
+
+  // Select the existing session -> existing session becomes highlighted, #newSessionBtn is un-highlighted
+  await sandbox.selectSessionFromSidebar('existing-session-1111');
+  assert.strictEqual(
+    elements.newSessionBtn.classList.contains('active'),
+    false,
+    '#newSessionBtn should not be highlighted when an existing session is selected'
+  );
+  assert.ok(
+    elements.sidebarList.innerHTML.includes('class="session-item active"') &&
+      elements.sidebarList.innerHTML.includes('data-session-key="existing-session-1111"'),
+    'Selected existing session should be highlighted in #sidebarList'
+  );
+
+  // Click #newSessionBtn -> #newSessionBtn becomes highlighted again as placeholder, no new session added yet
+  await elements.newSessionBtn.trigger('click');
+  elements.promptInput.value = 'My first message in a new session';
+  await elements.promptInput.trigger('input');
+  sandbox.renderSidebar();
+
+  assert.strictEqual(
+    elements.newSessionBtn.classList.contains('active'),
+    true,
+    'Clicking #newSessionBtn should highlight #newSessionBtn itself as a placeholder'
+  );
+  assert.strictEqual(
+    elements.sidebarCount.textContent,
+    '1',
+    'No new session should be added below #newSessionBtn before the first message is sent'
+  );
+  assert.ok(
+    !elements.sidebarList.innerHTML.includes('class="session-item active"'),
+    'No session in #sidebarList should be highlighted while #newSessionBtn is active'
+  );
+
+  // Send the first message -> new session is added below #newSessionBtn (at top of #sidebarList) and becomes highlighted
+  const sendPromise = sandbox.sendChat();
+  // Inspect state synchronously right after sendChat updates the sidebar and before stream closes
+  assert.strictEqual(
+    elements.newSessionBtn.classList.contains('active'),
+    false,
+    '#newSessionBtn should no longer be highlighted once the first message is sent'
+  );
+  assert.strictEqual(
+    elements.sidebarCount.textContent,
+    '2',
+    'New session should be added to the session list once the first message is sent'
+  );
+
+  const buttonMatches = [
+    ...elements.sidebarList.innerHTML.matchAll(
+      /<button[^>]*class="([^"]*)"[^>]*data-session-key="([^"]*)"/g
+    )
+  ];
+  assert.strictEqual(buttonMatches.length, 2, 'Should render 2 sessions in #sidebarList');
+  assert.ok(
+    buttonMatches[0][2].startsWith('turn-'),
+    'New session should be added at the very top of #sidebarList (directly below #newSessionBtn)'
+  );
+  assert.ok(
+    buttonMatches[0][1].split(/\s+/).includes('active'),
+    'Newly added session below #newSessionBtn should become highlighted (.active)'
+  );
+  assert.strictEqual(
+    buttonMatches[1][2],
+    'existing-session-1111',
+    'Existing session should appear below the newly added session'
+  );
+  assert.ok(
+    !buttonMatches[1][1].split(/\s+/).includes('active'),
+    'Existing session should not be highlighted'
+  );
+
+  await sendPromise;
+  assert.strictEqual(chatPosted, true, 'Should have posted chat message');
+
+  const postTurnMatches = [
+    ...elements.sidebarList.innerHTML.matchAll(
+      /<button[^>]*class="([^"]*)"[^>]*data-session-key="([^"]*)"/g
+    )
+  ];
+  assert.strictEqual(postTurnMatches.length, 2, 'Should still render 2 sessions after turn completes');
+  assert.ok(
+    postTurnMatches[0][1].split(/\s+/).includes('active'),
+    'Newly added session should remain at the top and highlighted after turn completes'
+  );
+  console.log('   -> Passed all Sidebar New Session Button & Placeholder Lifecycle assertions!');
+}
+
 async function main() {
   const runLiveAsk = process.argv.includes('--ask');
   const server = app.listen(0, '127.0.0.1', async () => {
@@ -313,6 +584,9 @@ async function main() {
 
       // 3. Unit tests for background task / wakeup lifecycle
       runTurnStateUnitTests();
+
+      // 4. Unit tests for sidebar New Session button & placeholder behavior (agyolo#5)
+      await runSidebarNewSessionTests(indexRes.body, jsRes.body);
 
       if (runLiveAsk) {
         console.log('\n4. Running Live ask_question Roundtrip Test (POST /api/chat -> POST /api/ask-question)...');
