@@ -1,5 +1,6 @@
 use crate::models::{
-    ConversationResponse, LiveSessionMeta, SessionSummary, WorkspacesResponse,
+    ConversationResponse, LiveSessionMeta, PickDirectoryResponse, SessionSummary,
+    WorkspacesResponse,
 };
 use crate::pty_manager::AppState;
 use crate::turn_state::parse_transcript_lines;
@@ -9,6 +10,7 @@ use std::ffi::{CStr, CString};
 use std::fs;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::ptr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -530,6 +532,128 @@ pub fn list_workspaces(app_state: &AppState) -> WorkspacesResponse {
     }
 }
 
+/// Normalize a POSIX directory path by stripping trailing slashes (except root `/`).
+pub fn normalize_directory_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed == "/" {
+        return "/".to_string();
+    }
+    let stripped = trimmed.trim_end_matches('/');
+    if stripped.is_empty() {
+        "/".to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
+/// Resolve a valid existing directory to seed the native folder picker dialog.
+pub fn resolve_initial_picker_directory(candidate: Option<&str>) -> String {
+    if let Some(raw) = candidate {
+        let normalized = normalize_directory_path(raw);
+        if !normalized.is_empty() {
+            let path = Path::new(&normalized);
+            if path.is_dir() {
+                return normalized;
+            }
+            if let Some(parent) = path.parent() {
+                if parent.is_dir() {
+                    return normalize_directory_path(&parent.to_string_lossy());
+                }
+            }
+        }
+    }
+
+    let home = home_dir();
+    if home.is_dir() {
+        return normalize_directory_path(&home.to_string_lossy());
+    }
+    "/".to_string()
+}
+
+/// Open the native macOS folder picker dialog via `/usr/bin/osascript` and return the chosen POSIX path.
+pub fn pick_directory_dialog(initial_path: Option<&str>) -> Result<PickDirectoryResponse, String> {
+    if let Ok(mock_pick) = env::var("AGY_MOCK_PICK_DIR") {
+        let trimmed = mock_pick.trim();
+        if !trimmed.is_empty() {
+            if trimmed == "__CANCEL__" {
+                return Ok(PickDirectoryResponse {
+                    cancelled: true,
+                    path: None,
+                });
+            }
+            if trimmed == "__ERROR__" {
+                return Err("Mock directory picker error".to_string());
+            }
+            return Ok(PickDirectoryResponse {
+                cancelled: false,
+                path: Some(normalize_directory_path(trimmed)),
+            });
+        }
+    }
+
+    let start_dir = resolve_initial_picker_directory(initial_path);
+    let script = concat!(
+        "on run argv\n",
+        "  set promptText to \"Select Workspace Folder\"\n",
+        "  set hasStart to false\n",
+        "  set startAlias to missing value\n",
+        "  if (count of argv) > 0 then\n",
+        "    try\n",
+        "      set startAlias to POSIX file (item 1 of argv) as alias\n",
+        "      set hasStart to true\n",
+        "    end try\n",
+        "  end if\n",
+        "  if hasStart then\n",
+        "    set chosenFolder to choose folder with prompt promptText default location startAlias\n",
+        "  else\n",
+        "    set chosenFolder to choose folder with prompt promptText\n",
+        "  end if\n",
+        "  return POSIX path of chosenFolder\n",
+        "end run"
+    );
+
+    let output = Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .arg(&start_dir)
+        .output()
+        .map_err(|e| format!("Failed to launch macOS folder picker: {}", e))?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let selected = normalize_directory_path(&stdout);
+        if selected.is_empty() {
+            return Ok(PickDirectoryResponse {
+                cancelled: true,
+                path: None,
+            });
+        }
+        return Ok(PickDirectoryResponse {
+            cancelled: false,
+            path: Some(selected),
+        });
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr_lower = stderr.to_lowercase();
+    if stderr.contains("-128") || stderr_lower.contains("user canceled") {
+        return Ok(PickDirectoryResponse {
+            cancelled: true,
+            path: None,
+        });
+    }
+
+    let detail = stderr.trim();
+    Err(if detail.is_empty() {
+        "Native folder picker exited with an error".to_string()
+    } else {
+        detail.to_string()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,5 +680,18 @@ mod tests {
             assert!(!s.title.is_empty());
         }
     }
+
+    #[test]
+    fn test_normalize_and_resolve_picker_directory() {
+        assert_eq!(normalize_directory_path(" /Users/jason/projects/ "), "/Users/jason/projects");
+        assert_eq!(normalize_directory_path("/"), "/");
+        assert_eq!(normalize_directory_path("///"), "/");
+        assert_eq!(normalize_directory_path("   "), "");
+
+        let home = home_dir();
+        let resolved_missing = resolve_initial_picker_directory(Some("/nonexistent_root_dir_xyz/sub"));
+        assert_eq!(resolved_missing, normalize_directory_path(&home.to_string_lossy()));
+    }
 }
+
 

@@ -1,5 +1,6 @@
 const express = require('express');
 const pty = require('node-pty');
+const { execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -1067,6 +1068,120 @@ app.get('/api/workspaces', (req, res) => {
 });
 
 /**
+ * Normalize a POSIX directory path returned by `osascript` or user input.
+ */
+function normalizeDirectoryPath(rawPath) {
+  if (typeof rawPath !== 'string') return '';
+  const trimmed = rawPath.trim();
+  if (!trimmed) return '';
+  if (trimmed === '/') return '/';
+  return trimmed.replace(/\/+$/, '') || '/';
+}
+
+/**
+ * Resolve a valid existing starting directory for the native macOS folder picker.
+ */
+function resolveInitialPickerDirectory(initialPath) {
+  if (typeof initialPath === 'string' && initialPath.trim()) {
+    const candidate = normalizeDirectoryPath(initialPath);
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+        return candidate;
+      }
+      const parentDir = path.dirname(candidate);
+      if (parentDir && fs.existsSync(parentDir) && fs.statSync(parentDir).isDirectory()) {
+        return normalizeDirectoryPath(parentDir);
+      }
+    } catch (_) {}
+  }
+  const home = os.homedir();
+  if (home && fs.existsSync(home)) {
+    return normalizeDirectoryPath(home);
+  }
+  return '/';
+}
+
+/**
+ * Open the native macOS Finder directory chooser (`choose folder`) via `/usr/bin/osascript`.
+ */
+function pickDirectoryDialog(initialPath) {
+  return new Promise((resolve, reject) => {
+    const mockPick = typeof process.env.AGY_MOCK_PICK_DIR === 'string'
+      ? process.env.AGY_MOCK_PICK_DIR.trim()
+      : '';
+    if (mockPick.length > 0) {
+      if (mockPick === '__CANCEL__') {
+        return resolve({ cancelled: true, path: null });
+      }
+      if (mockPick === '__ERROR__') {
+        return reject(new Error('Mock directory picker error'));
+      }
+      const normalizedMock = normalizeDirectoryPath(mockPick);
+      return resolve({
+        cancelled: !normalizedMock,
+        path: normalizedMock || null
+      });
+    }
+
+    const startDir = resolveInitialPickerDirectory(initialPath);
+    const scriptLines = [
+      'on run argv',
+      '  set promptText to "Select Workspace Folder"',
+      '  set startAlias to missing value',
+      '  if (count of argv) > 0 and (item 1 of argv) is not "" then',
+      '    try',
+      '      set startAlias to POSIX file (item 1 of argv) as alias',
+      '    end try',
+      '  end if',
+      '  if startAlias is not missing value then',
+      '    set chosenFolder to choose folder with prompt promptText default location startAlias',
+      '  else',
+      '    set chosenFolder to choose folder with prompt promptText',
+      '  end if',
+      '  return POSIX path of chosenFolder',
+      'end run'
+    ];
+    const osascriptArgs = [];
+    for (const line of scriptLines) {
+      osascriptArgs.push('-e', line);
+    }
+    osascriptArgs.push(startDir);
+
+    execFile('/usr/bin/osascript', osascriptArgs, (err, stdout, stderr) => {
+      if (err) {
+        const errText = `${stderr || ''} ${err.message || ''}`;
+        if (/(-128)|User canceled/i.test(errText)) {
+          return resolve({ cancelled: true, path: null });
+        }
+        return reject(
+          new Error(`Failed to open native folder picker: ${(stderr || err.message || '').trim()}`)
+        );
+      }
+
+      const selectedPath = normalizeDirectoryPath(stdout);
+      if (!selectedPath) {
+        return resolve({ cancelled: true, path: null });
+      }
+      resolve({ cancelled: false, path: selectedPath });
+    });
+  });
+}
+
+/**
+ * POST /api/pick-directory
+ * Opens the native macOS folder picker dialog and returns `{ cancelled, path }`.
+ */
+app.post('/api/pick-directory', async (req, res) => {
+  const { initialPath } = req.body || {};
+  try {
+    const result = await pickDirectoryDialog(initialPath);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * GET /api/sessions
  * Returns historical and active `agy` sessions with live progress metadata.
  */
@@ -1234,4 +1349,12 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, runAgyTurn, readConversation, listSessions, runPrechecks };
+module.exports = {
+  app,
+  runAgyTurn,
+  readConversation,
+  listSessions,
+  runPrechecks,
+  pickDirectoryDialog,
+  normalizeDirectoryPath
+};

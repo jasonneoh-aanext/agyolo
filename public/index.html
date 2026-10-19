@@ -31,14 +31,7 @@
       </div>
     </div>
 
-    <div class="controls">
-      <!-- Base Path Selector -->
-      <div class="control-group" title="Workspace base directory (cwd) passed to node-pty">
-        <span class="control-label">Path</span>
-        <input id="cwdInput" class="path-input" list="workspacePresets" placeholder="/Users/jason/projects/..." />
-        <datalist id="workspacePresets"></datalist>
-      </div>
-    </div>
+    <div class="controls"></div>
   </header>
 
   <!-- Main App Body: Left Session Sidebar + Right Chat Column -->
@@ -74,6 +67,31 @@
 
       <!-- Bottom Input Box -->
       <footer class="composer-wrap">
+        <div class="composer-path-row">
+          <div
+            id="pathSelectorGroup"
+            class="control-group path-selector-group"
+            title="Click to select workspace folder"
+          >
+            <span class="control-label">Path</span>
+            <input
+              id="cwdInput"
+              class="path-input"
+              type="text"
+              readonly
+              placeholder="Select workspace folder..."
+              aria-label="Workspace directory path"
+            />
+            <button
+              id="browsePathBtn"
+              class="btn-browse-path"
+              type="button"
+              title="Browse workspace folder"
+            >
+              Browse…
+            </button>
+          </div>
+        </div>
         <div class="composer-box">
           <textarea
             id="promptInput"

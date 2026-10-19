@@ -147,6 +147,13 @@ pub struct WorkspacesResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PickDirectoryResponse {
+    pub cancelled: bool,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionsListResponse {
     pub sessions: Vec<SessionSummary>,
 }

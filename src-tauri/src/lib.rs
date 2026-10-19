@@ -5,8 +5,8 @@ pub mod sessions;
 pub mod turn_state;
 
 use models::{
-    AskAnswerInput, AskQuestionSubmission, ConversationResponse, PrechecksReport,
-    SessionsListResponse, TurnExitResult, WorkspacesResponse,
+    AskAnswerInput, AskQuestionSubmission, ConversationResponse, PickDirectoryResponse,
+    PrechecksReport, SessionsListResponse, TurnExitResult, WorkspacesResponse,
 };
 use pty_manager::{emit_turn_event, start_agy_turn_blocking, AppState, TurnController};
 use serde_json::{json, Value};
@@ -73,6 +73,15 @@ async fn get_workspaces(state: State<'_, Arc<AppState>>) -> Result<WorkspacesRes
     tauri::async_runtime::spawn_blocking(move || sessions::list_workspaces(&app_state))
         .await
         .map_err(|e| format!("Workspace discovery task failed: {}", e))
+}
+
+#[tauri::command]
+async fn pick_directory(initial_path: Option<String>) -> Result<PickDirectoryResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        sessions::pick_directory_dialog(initial_path.as_deref())
+    })
+    .await
+    .map_err(|e| format!("Directory picker task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -291,6 +300,7 @@ pub fn run() {
         .manage(shared_state)
         .invoke_handler(tauri::generate_handler![
             get_workspaces,
+            pick_directory,
             list_sessions,
             get_session,
             attach_session_stream,

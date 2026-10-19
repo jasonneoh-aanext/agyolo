@@ -92,12 +92,15 @@ const sidebarCountEl = document.getElementById('sidebarCount');
 const activeRunsBadgeEl = document.getElementById('activeRunsBadge');
 const activeRunsTextEl = document.getElementById('activeRunsText');
 const cwdInput = document.getElementById('cwdInput');
-const workspacePresetsEl = document.getElementById('workspacePresets');
+const pathSelectorGroup = document.getElementById('pathSelectorGroup');
+const browsePathBtn = document.getElementById('browsePathBtn');
 const newSessionBtn = document.getElementById('newSessionBtn');
 const promptInput = document.getElementById('promptInput');
 const sendBtn = document.getElementById('sendBtn');
 const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
+
+let isPickingDirectory = false;
 
 function createSessionState(key, overrides = {}) {
   return {
@@ -1092,16 +1095,64 @@ async function loadWorkspaces() {
       data = await tauriInvoke('get_workspaces');
     } else {
       const res = await fetch('/api/workspaces');
-      if (!res.ok) return;
+      if (!res.ok) {
+        throw new Error(`Workspace discovery failed with status ${res.status}`);
+      }
       data = await res.json();
     }
     if (!data) return;
     defaultWorkspace = data.defaultWorkspace || '';
     cwdInput.value = defaultWorkspace;
-    workspacePresetsEl.innerHTML = (data.workspaces || [])
-      .map((w) => `<option value="${escapeHtml(w)}"></option>`)
-      .join('');
-  } catch (_) {}
+    cwdInput.title = defaultWorkspace;
+  } catch (err) {
+    console.error('Failed to load default workspace:', err);
+  }
+}
+
+async function pickWorkspaceDirectory() {
+  if (isPickingDirectory) return;
+  isPickingDirectory = true;
+  if (browsePathBtn) {
+    browsePathBtn.disabled = true;
+  }
+
+  try {
+    const initialPath = cwdInput.value.trim() || defaultWorkspace || '';
+    let result = null;
+
+    if (isTauriRuntime()) {
+      result = await tauriInvoke('pick_directory', { initialPath });
+    } else {
+      const res = await fetch('/api/pick-directory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initialPath })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(body.error || `Folder picker failed with status ${res.status}`);
+      }
+      result = body;
+    }
+
+    if (result && !result.cancelled && result.path) {
+      cwdInput.value = result.path;
+      cwdInput.title = result.path;
+      const state = getActiveState();
+      state.workspace = result.path;
+      renderSidebar();
+    }
+  } catch (err) {
+    const state = getActiveState();
+    state.statusState = 'error';
+    state.statusMessage = `Error picking folder: ${(err && err.message) || String(err)}`;
+    syncComposerAndStatusBar();
+  } finally {
+    isPickingDirectory = false;
+    if (browsePathBtn) {
+      browsePathBtn.disabled = false;
+    }
+  }
 }
 
 async function refreshSessionList() {
@@ -1350,6 +1401,11 @@ async function loadSession(sessionKey, options = {}) {
       statusMessage: 'New Session · Ready'
     });
     promptInput.value = newState.draftPrompt || '';
+    const resolvedNewWorkspace = newState.workspace || defaultWorkspace || '';
+    if (resolvedNewWorkspace) {
+      cwdInput.value = resolvedNewWorkspace;
+      cwdInput.title = resolvedNewWorkspace;
+    }
     if (updateUrl) {
       syncSessionUrlParam(null);
     }
@@ -1367,6 +1423,7 @@ async function loadSession(sessionKey, options = {}) {
     promptInput.value = turnState.draftPrompt || '';
     if (turnState.workspace) {
       cwdInput.value = turnState.workspace;
+      cwdInput.title = turnState.workspace;
     }
     if (updateUrl) {
       syncSessionUrlParam(null);
@@ -1386,6 +1443,7 @@ async function loadSession(sessionKey, options = {}) {
   if (state.isRunning && activeStreamAttachments.has(sessionKey)) {
     if (state.workspace) {
       cwdInput.value = state.workspace;
+      cwdInput.title = state.workspace;
     }
     if (updateUrl) {
       syncSessionUrlParam(sessionKey);
@@ -1459,6 +1517,7 @@ async function loadSession(sessionKey, options = {}) {
     if (resolvedWorkspace) {
       state.workspace = resolvedWorkspace;
       cwdInput.value = resolvedWorkspace;
+      cwdInput.title = resolvedWorkspace;
     }
 
     if (matchedSession && matchedSession.title) {
@@ -1622,6 +1681,26 @@ sidebarToggleBtn.addEventListener('click', () => {
 
 newSessionBtn.addEventListener('click', () => {
   selectSessionFromSidebar(NEW_SESSION_KEY);
+});
+
+if (browsePathBtn) {
+  browsePathBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    pickWorkspaceDirectory();
+  });
+}
+
+if (pathSelectorGroup) {
+  pathSelectorGroup.addEventListener('click', () => {
+    pickWorkspaceDirectory();
+  });
+}
+
+cwdInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    pickWorkspaceDirectory();
+  }
 });
 
 sendBtn.addEventListener('click', sendChat);

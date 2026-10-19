@@ -731,9 +731,58 @@ async function main() {
       assert.strictEqual(precheckJsRes.statusCode, 200);
       assert.strictEqual(jsRes.statusCode, 200);
       assert.ok(indexRes.body.includes('id="precheckModal"'), 'index.html should include startup precheck modal');
-      console.log(
-        `1. Static Web UI: GET / (${indexRes.body.length}B), /styles.css (${cssRes.body.length}B), /precheckModal.js (${precheckJsRes.body.length}B), /app.js (${jsRes.body.length}B)`
+
+      // Verify path selector was moved out of topbar and placed above .composer-box inside .composer-wrap
+      const topbarEndIdx = indexRes.body.indexOf('</header>');
+      const composerWrapIdx = indexRes.body.indexOf('<footer class="composer-wrap">');
+      const cwdInputIdx = indexRes.body.indexOf('id="cwdInput"');
+      const browseBtnIdx = indexRes.body.indexOf('id="browsePathBtn"');
+      const composerBoxIdx = indexRes.body.indexOf('<div class="composer-box">');
+      assert.ok(cwdInputIdx > topbarEndIdx, 'cwdInput should not be inside topbar header');
+      assert.ok(
+        cwdInputIdx > composerWrapIdx && cwdInputIdx < composerBoxIdx,
+        'cwdInput should be inside composer-wrap directly above composer-box'
       );
+      assert.ok(
+        browseBtnIdx > composerWrapIdx && browseBtnIdx < composerBoxIdx,
+        'browsePathBtn should be inside composer-wrap directly above composer-box'
+      );
+      console.log(
+        `1. Static Web UI: GET / (${indexRes.body.length}B), /styles.css (${cssRes.body.length}B), /precheckModal.js (${precheckJsRes.body.length}B), /app.js (${jsRes.body.length}B) [Path selector above composer box verified]`
+      );
+
+      // 1b. Native Directory Picker API check (selection, cancellation, and error handling)
+      const prevMockPick = process.env.AGY_MOCK_PICK_DIR;
+      try {
+        process.env.AGY_MOCK_PICK_DIR = '/Users/jason/projects/agyolo/';
+        const pickRes = await httpPostJson(port, '/api/pick-directory', {
+          initialPath: '/Users/jason/projects'
+        });
+        assert.strictEqual(pickRes.statusCode, 200);
+        const pickData = JSON.parse(pickRes.body);
+        assert.strictEqual(pickData.cancelled, false);
+        assert.strictEqual(pickData.path, '/Users/jason/projects/agyolo');
+
+        process.env.AGY_MOCK_PICK_DIR = '__CANCEL__';
+        const cancelRes = await httpPostJson(port, '/api/pick-directory', {});
+        assert.strictEqual(cancelRes.statusCode, 200);
+        const cancelData = JSON.parse(cancelRes.body);
+        assert.strictEqual(cancelData.cancelled, true);
+        assert.strictEqual(cancelData.path, null);
+
+        process.env.AGY_MOCK_PICK_DIR = '__ERROR__';
+        const errRes = await httpPostJson(port, '/api/pick-directory', {});
+        assert.strictEqual(errRes.statusCode, 500);
+        const errData = JSON.parse(errRes.body);
+        assert.ok(errData.error, 'Error response should include error message');
+      } finally {
+        if (prevMockPick === undefined) {
+          delete process.env.AGY_MOCK_PICK_DIR;
+        } else {
+          process.env.AGY_MOCK_PICK_DIR = prevMockPick;
+        }
+      }
+      console.log('1b. Native Directory Picker API (POST /api/pick-directory): passed selection, cancel, and error assertions');
 
       // 2. Check sessions list includes live progress metadata fields
       const sessionsRes = await httpGet(port, '/api/sessions');
