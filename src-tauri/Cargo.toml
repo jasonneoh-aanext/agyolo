@@ -1,9 +1,14 @@
 [package]
 name = "agy-test"
 version = "1.0.0"
-description = "Antigravity Headless PTY Console (macOS Tauri App)"
+description = "AGYolo · Headless PTY Console (macOS Tauri App)"
 authors = ["Jason Neoh"]
 edition = "2021"
+default-run = "AGYolo"
+
+[[bin]]
+name = "AGYolo"
+path = "src/main.rs"
 
 [lib]
 name = "antigravity_console_lib"

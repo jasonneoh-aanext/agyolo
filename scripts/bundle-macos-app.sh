@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_NAME="Antigravity Console"
-BUNDLE_ID="com.jasonneoh.antigravity.console"
+APP_NAME="AGYolo"
+BUNDLE_ID="com.jasonneoh.agyolo"
 VERSION="1.0.0"
-EXEC_NAME="agy-test"
+EXEC_NAME="AGYolo"
 
 PROFILE="${1:-debug}"
 CARGO_ARGS=(--manifest-path "$ROOT_DIR/src-tauri/Cargo.toml" --offline)

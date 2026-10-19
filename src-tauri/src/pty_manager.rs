@@ -166,7 +166,7 @@ impl TurnController {
     pub fn get_snapshot_meta(&self) -> LiveSessionMeta {
         if let Ok(st) = self.state.lock() {
             LiveSessionMeta {
-                is_running: !st.is_exiting,
+                is_running: st.current_state != "idle",
                 turn_id: Some(self.turn_id.clone()),
                 state: st.current_state.clone(),
                 message: st.current_status_message.clone(),

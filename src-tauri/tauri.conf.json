@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Antigravity Console",
+  "productName": "AGYolo",
   "version": "1.0.0",
-  "identifier": "com.jasonneoh.antigravity.console",
+  "identifier": "com.jasonneoh.agyolo",
   "build": {
     "frontendDist": "../public"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Antigravity · Headless PTY Console",
+        "title": "AGYolo · Headless PTY Console",
         "width": 1280,
         "height": 860,
         "minWidth": 840,

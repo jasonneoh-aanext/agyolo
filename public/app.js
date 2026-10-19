@@ -121,6 +121,7 @@ function createSessionState(key, overrides = {}) {
     updatedAt: new Date().toISOString(),
     createdLocally: false,
     isRunning: false,
+    hasUnreadCompletion: false,
     statusState: 'idle',
     statusMessage: key === NEW_SESSION_KEY ? 'New Session · Ready' : 'Idle · Ready',
     progressLabel: '',
@@ -163,6 +164,9 @@ function migrateSessionKey(oldKey, newSessionId) {
       if (existingOld.permissions.length === 0 && existingNew.permissions.length > 0) {
         existingOld.permissions = existingNew.permissions;
       }
+      existingOld.hasUnreadCompletion = Boolean(
+        existingOld.hasUnreadCompletion || existingNew.hasUnreadCompletion
+      );
     }
     sessionStates.set(newSessionId, existingOld);
     sessionStates.delete(oldKey);
@@ -267,6 +271,13 @@ function renderSidebar() {
   const displayEntries = [];
   const seenSessionIds = new Set();
   const knownSessionIdSet = new Set(knownSessions.map((s) => s.id));
+  const migratedTurnIds = new Set();
+
+  for (const [key, st] of sessionStates.entries()) {
+    if (!key.startsWith('turn-') && st.turnId) {
+      migratedTurnIds.add(st.turnId);
+    }
+  }
 
   // 1. Include any newly started turns (after first message sent) not yet in knownSessions at the top
   const inFlightStates = Array.from(sessionStates.entries())
@@ -274,7 +285,10 @@ function renderSidebar() {
       ([key, st]) =>
         key !== NEW_SESSION_KEY &&
         !knownSessionIdSet.has(key) &&
-        ((key.startsWith('turn-') && !st.sessionId) || st.isRunning || st.createdLocally)
+        ((key.startsWith('turn-') && !st.sessionId) ||
+          st.isRunning ||
+          st.createdLocally ||
+          st.hasUnreadCompletion)
     )
     .sort(([, a], [, b]) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
 
@@ -287,8 +301,9 @@ function renderSidebar() {
       shortId: st.sessionId ? st.sessionId.slice(0, 8) : 'spawning',
       workspace: st.workspace || '',
       stepCount: st.stepCount || st.items.length,
-      isRunning: st.isRunning,
-      hasPendingQuestion: st.hasPendingQuestion,
+      isRunning: Boolean(st.isRunning),
+      hasUnreadCompletion: Boolean(!st.isRunning && st.hasUnreadCompletion),
+      hasPendingQuestion: Boolean(st.hasPendingQuestion),
       statusState: st.statusState,
       progressLabel: st.progressLabel || st.statusMessage
     });
@@ -297,9 +312,17 @@ function renderSidebar() {
   // 2. Merge server-known sessions with local sessionStates
   for (const s of knownSessions) {
     if (seenSessionIds.has(s.id)) continue;
+    // Skip stale provisional turn entries from knownSessions if already migrated or finished locally
+    if (s.id.startsWith('turn-') && (!sessionStates.has(s.id) || migratedTurnIds.has(s.id))) {
+      continue;
+    }
+    if (s.turnId && seenSessionIds.has(s.turnId)) {
+      continue;
+    }
     seenSessionIds.add(s.id);
     const local = sessionStates.get(s.id);
-    const isRunning = Boolean((local && local.isRunning) || s.isRunning);
+    const isRunning = local ? Boolean(local.isRunning) : Boolean(s.isRunning);
+    const hasUnreadCompletion = Boolean(!isRunning && local && local.hasUnreadCompletion);
     const hasPendingQuestion = Boolean(
       (local && local.hasPendingQuestion) || s.hasPendingQuestion
     );
@@ -323,6 +346,7 @@ function renderSidebar() {
       workspace: s.workspace || (local && local.workspace) || '',
       stepCount,
       isRunning,
+      hasUnreadCompletion,
       hasPendingQuestion,
       statusState: (local && local.statusState) || s.state || 'idle',
       progressLabel
@@ -344,8 +368,9 @@ function renderSidebar() {
         shortId: key.slice(0, 8),
         workspace: st.workspace || '',
         stepCount: st.stepCount || st.items.length,
-        isRunning: st.isRunning,
-        hasPendingQuestion: st.hasPendingQuestion,
+        isRunning: Boolean(st.isRunning),
+        hasUnreadCompletion: Boolean(!st.isRunning && st.hasUnreadCompletion),
+        hasPendingQuestion: Boolean(st.hasPendingQuestion),
         statusState: st.statusState,
         progressLabel: st.progressLabel || st.statusMessage
       });
@@ -371,10 +396,12 @@ function renderSidebar() {
   const html = displayEntries
     .map((entry) => {
       const isActive = entry.key === activeViewKey;
+      const isCompletedUnread = Boolean(entry.hasUnreadCompletion && !entry.isRunning);
       const classes = [
         'session-item',
         isActive ? 'active' : '',
         entry.isRunning ? 'running' : '',
+        isCompletedUnread ? 'completed' : '',
         entry.hasPendingQuestion ? 'needs-input' : ''
       ]
         .filter(Boolean)
@@ -390,7 +417,9 @@ function renderSidebar() {
       }
 
       const wsShort = formatWorkspaceShort(entry.workspace);
-      const stepsLabel = `${entry.stepCount || 0} steps`;
+      const stepsLabel = isCompletedUnread
+        ? `✓ Done · ${entry.stepCount || 0} steps`
+        : `${entry.stepCount || 0} steps`;
 
       const progressHtml =
         entry.isRunning || entry.hasPendingQuestion
@@ -1120,6 +1149,9 @@ async function refreshSessionList() {
     knownSessions = sessions;
 
     for (const s of sessions) {
+      if (!sessionStates.has(s.id) && s.turnId && sessionStates.has(s.turnId)) {
+        migrateSessionKey(s.turnId, s.id);
+      }
       if (sessionStates.has(s.id)) {
         const local = sessionStates.get(s.id);
         local.title = s.title || local.title;
@@ -1129,6 +1161,7 @@ async function refreshSessionList() {
         // If server reports running and we aren't attached to its stream yet, sync metadata
         if (s.isRunning && !activeStreamAttachments.has(s.id)) {
           local.isRunning = true;
+          local.hasUnreadCompletion = false;
           local.turnId = s.turnId || local.turnId;
           local.statusState = s.state || 'running';
           local.statusMessage = s.statusMessage || 'Running...';
@@ -1136,6 +1169,7 @@ async function refreshSessionList() {
           local.hasPendingQuestion = Boolean(s.hasPendingQuestion);
         } else if (!s.isRunning && local.isRunning && !activeStreamAttachments.has(s.id)) {
           local.isRunning = false;
+          local.hasUnreadCompletion = true;
           local.statusState = 'idle';
           local.statusMessage = `Idle · Session ${s.id.slice(0, 8)}`;
           local.progressLabel = '';
@@ -1149,6 +1183,7 @@ async function refreshSessionList() {
           workspace: s.workspace || '',
           stepCount: s.stepCount || 0,
           isRunning: true,
+          hasUnreadCompletion: false,
           statusState: s.state || 'running',
           statusMessage: s.statusMessage || 'Running...',
           progressLabel: s.progressLabel || s.statusMessage || 'Running...',
@@ -1168,17 +1203,25 @@ async function refreshSessionList() {
  */
 async function handleSessionSseEvent(stateRef, event, data) {
   let state = stateRef.current;
+  let shouldRefreshSessions = false;
 
   if (event === 'session' && data.sessionId) {
     state = migrateSessionKey(state.key, data.sessionId);
     stateRef.current = state;
     state.isRunning = true;
+    state.hasUnreadCompletion = false;
     state.statusState = 'running';
     state.statusMessage = `Session ${data.sessionId.slice(0, 8)} active · Running...`;
     state.progressLabel = state.progressLabel || 'Generating...';
-    await refreshSessionList();
+    shouldRefreshSessions = true;
   } else if (event === 'status') {
-    state.isRunning = data.state !== 'idle';
+    const nextRunning = data.state !== 'idle';
+    if (nextRunning) {
+      state.hasUnreadCompletion = false;
+    } else if (state.isRunning && !nextRunning) {
+      state.hasUnreadCompletion = true;
+    }
+    state.isRunning = nextRunning;
     state.statusState = data.state || 'running';
     state.statusMessage = data.message || state.statusMessage;
     state.progressLabel = data.progressLabel || data.message || state.progressLabel;
@@ -1238,13 +1281,14 @@ async function handleSessionSseEvent(stateRef, event, data) {
       state.permissions = data.permissions;
     }
     state.isRunning = false;
+    state.hasUnreadCompletion = true;
     state.hasPendingQuestion = false;
     state.statusState = 'idle';
     state.progressLabel = '';
     state.statusMessage = `Idle · Session ${
       state.sessionId ? state.sessionId.slice(0, 8) : ''
     } (exit=${data.exitCode})`;
-    await refreshSessionList();
+    shouldRefreshSessions = true;
   } else if (event === 'error') {
     state.isRunning = false;
     state.statusState = 'error';
@@ -1257,6 +1301,10 @@ async function handleSessionSseEvent(stateRef, event, data) {
     syncComposerAndStatusBar();
     renderStream();
     scrollToBottom();
+  }
+
+  if (shouldRefreshSessions) {
+    await refreshSessionList();
   }
 }
 
@@ -1291,6 +1339,14 @@ async function selectSessionFromSidebar(sessionKey) {
   if (!sessionKey || sessionKey === NEW_SESSION_KEY) {
     await loadSession(null);
     return;
+  }
+
+  // Viewing a completed session clears only that session's green completion state
+  if (sessionStates.has(sessionKey)) {
+    const target = sessionStates.get(sessionKey);
+    if (!target.isRunning) {
+      target.hasUnreadCompletion = false;
+    }
   }
 
   await loadSession(sessionKey);
@@ -1331,6 +1387,9 @@ async function loadSession(sessionKey, options = {}) {
   if (sessionKey.startsWith('turn-') && sessionStates.has(sessionKey)) {
     activeViewKey = sessionKey;
     const turnState = sessionStates.get(sessionKey);
+    if (!turnState.isRunning) {
+      turnState.hasUnreadCompletion = false;
+    }
     promptInput.value = turnState.draftPrompt || '';
     if (turnState.workspace) {
       cwdInput.value = turnState.workspace;
@@ -1348,6 +1407,9 @@ async function loadSession(sessionKey, options = {}) {
 
   activeViewKey = sessionKey;
   const state = getOrCreateSessionState(sessionKey);
+  if (!state.isRunning) {
+    state.hasUnreadCompletion = false;
+  }
   promptInput.value = state.draftPrompt || '';
 
   // If this session is already actively streaming in this window, render immediately from memory!
@@ -1401,6 +1463,9 @@ async function loadSession(sessionKey, options = {}) {
     state.permissions = data.permissions || state.permissions || [];
     state.stepCount = (data.rawSteps && data.rawSteps.length) || state.items.length;
     state.isRunning = Boolean(data.isRunning);
+    if (!state.isRunning) {
+      state.hasUnreadCompletion = false;
+    }
     state.turnId = data.turnId || state.turnId;
     state.hasPendingQuestion = Boolean(data.hasPendingQuestion);
     state.progressLabel = data.progressLabel || '';
@@ -1493,6 +1558,7 @@ async function sendChat() {
   targetState.sessionError = null;
   targetState.isRunning = true;
   targetState.updatedAt = new Date().toISOString();
+  targetState.hasUnreadCompletion = false;
   targetState.turnId = clientTurnId;
   targetState.workspace = cwd;
   targetState.statusState = 'running';
@@ -1540,6 +1606,9 @@ async function sendChat() {
     st.progressLabel = st.statusMessage;
   } finally {
     const st = stateRef.current;
+    if (st.isRunning && st.statusState !== 'error') {
+      st.hasUnreadCompletion = true;
+    }
     st.isRunning = false;
     activeStreamAttachments.delete(attachmentKey);
     tauriTurnRefs.delete(clientTurnId);
