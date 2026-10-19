@@ -67,10 +67,13 @@ pub fn now_iso_string() -> String {
     system_time_to_iso(SystemTime::now())
 }
 
-fn home_dir() -> PathBuf {
+/// Resolve the current user's home directory from `HOME`.
+pub fn home_dir() -> PathBuf {
     env::var("HOME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/Users/jason"))
+        .unwrap_or_else(env::temp_dir)
 }
 
 /// Primary and secondary Antigravity brain directories.
@@ -455,7 +458,6 @@ pub fn list_workspaces(app_state: &AppState) -> WorkspacesResponse {
     let home = home_dir();
     let projects_dir = home.join("Projects");
     let lower_projects_dir = home.join("projects");
-    let agy_test_dir = lower_projects_dir.join("agy-test");
 
     let default_workspace_path = env::current_dir()
         .ok()
@@ -472,10 +474,10 @@ pub fn list_workspaces(app_state: &AppState) -> WorkspacesResponse {
             cwd.exists() && s != "/" && !s.contains(".app/Contents")
         })
         .unwrap_or_else(|| {
-            if agy_test_dir.exists() {
-                agy_test_dir.clone()
-            } else if lower_projects_dir.exists() {
+            if lower_projects_dir.exists() {
                 lower_projects_dir.clone()
+            } else if projects_dir.exists() {
+                projects_dir.clone()
             } else {
                 home.clone()
             }
@@ -692,6 +694,77 @@ mod tests {
         let resolved_missing = resolve_initial_picker_directory(Some("/nonexistent_root_dir_xyz/sub"));
         assert_eq!(resolved_missing, normalize_directory_path(&home.to_string_lossy()));
     }
+
+    #[test]
+    fn test_pick_directory_dialog_mock_cases() {
+        let prev = env::var("AGY_MOCK_PICK_DIR").ok();
+
+        env::set_var("AGY_MOCK_PICK_DIR", "/Users/tester/workspace/demo-repo/");
+        let selected = pick_directory_dialog(Some("/Users/tester")).expect("mock selection should succeed");
+        assert!(!selected.cancelled);
+        assert_eq!(selected.path.as_deref(), Some("/Users/tester/workspace/demo-repo"));
+
+        env::set_var("AGY_MOCK_PICK_DIR", "__CANCEL__");
+        let cancelled = pick_directory_dialog(None).expect("mock cancel should succeed");
+        assert!(cancelled.cancelled);
+        assert!(cancelled.path.is_none());
+
+        env::set_var("AGY_MOCK_PICK_DIR", "__ERROR__");
+        let err = pick_directory_dialog(None).expect_err("mock error should return Err");
+        assert!(err.contains("Mock directory picker error"));
+
+        match prev {
+            Some(v) => env::set_var("AGY_MOCK_PICK_DIR", v),
+            None => env::remove_var("AGY_MOCK_PICK_DIR"),
+        }
+    }
+
+    #[test]
+    fn test_frontend_static_assets_and_layout() {
+        let public_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../public");
+        let index_html = fs::read_to_string(public_dir.join("index.html"))
+            .expect("public/index.html should exist");
+        let app_js = fs::read_to_string(public_dir.join("app.js"))
+            .expect("public/app.js should exist");
+        let precheck_js = fs::read_to_string(public_dir.join("precheckModal.js"))
+            .expect("public/precheckModal.js should exist");
+
+        // Precheck modal markup exists
+        assert!(index_html.contains("id=\"precheckModal\""));
+
+        // #newSessionBtn is inside #sidebar before #sidebarList, and not inside .topbar
+        let topbar_start_idx = index_html.find("class=\"topbar\"").expect(".topbar should exist");
+        let topbar_end_idx = index_html.find("</header>").expect("</header> should exist");
+        let sidebar_idx = index_html.find("id=\"sidebar\"").expect("#sidebar should exist");
+        let new_session_idx = index_html.find("id=\"newSessionBtn\"").expect("#newSessionBtn should exist");
+        let sidebar_list_idx = index_html.find("id=\"sidebarList\"").expect("#sidebarList should exist");
+        assert!(
+            topbar_start_idx < topbar_end_idx && topbar_end_idx < sidebar_idx,
+            ".topbar header must close before #sidebar"
+        );
+        assert!(
+            sidebar_idx < new_session_idx && new_session_idx < sidebar_list_idx,
+            "#newSessionBtn must be inside #sidebar above #sidebarList"
+        );
+
+        // #cwdInput and #browsePathBtn are inside .composer-wrap above .composer-box
+        let composer_wrap_idx = index_html.find("class=\"composer-wrap\"").expect(".composer-wrap should exist");
+        let cwd_input_idx = index_html.find("id=\"cwdInput\"").expect("#cwdInput should exist");
+        let browse_btn_idx = index_html.find("id=\"browsePathBtn\"").expect("#browsePathBtn should exist");
+        let composer_box_idx = index_html.find("class=\"composer-box\"").expect(".composer-box should exist");
+        assert!(
+            composer_wrap_idx < cwd_input_idx && cwd_input_idx < composer_box_idx,
+            "#cwdInput must be inside .composer-wrap above .composer-box"
+        );
+        assert!(
+            composer_wrap_idx < browse_btn_idx && browse_btn_idx < composer_box_idx,
+            "#browsePathBtn must be inside .composer-wrap above .composer-box"
+        );
+
+        // Frontend scripts use Tauri IPC exclusively with zero legacy /api/ HTTP fallbacks
+        assert!(app_js.contains("__TAURI__"));
+        assert!(!app_js.contains("/api/"));
+        assert!(precheck_js.contains("run_prechecks"));
+        assert!(!precheck_js.contains("/api/"));
+    }
 }
-
-

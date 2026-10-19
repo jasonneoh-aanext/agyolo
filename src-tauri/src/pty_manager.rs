@@ -12,7 +12,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -632,13 +632,17 @@ fn resume_banner_regex() -> &'static Regex {
 }
 
 pub fn get_agy_bin() -> String {
-    if let Ok(val) = env::var("AGY_BIN") {
-        if !val.trim().is_empty() {
-            return val;
-        }
-    }
-    let home = env::var("HOME").unwrap_or_default();
-    format!("{}/.local/bin/agy", home)
+    let configured = env::var("AGY_BIN")
+        .ok()
+        .filter(|val| !val.trim().is_empty())
+        .unwrap_or_else(|| {
+            crate::sessions::home_dir()
+                .join(".local/bin/agy")
+                .to_string_lossy()
+                .into_owned()
+        });
+    let path_env = env::var("PATH").unwrap_or_default();
+    crate::prechecks::resolve_agy_binary_path(&configured, &path_env).unwrap_or(configured)
 }
 
 pub fn get_gcp_project() -> String {
@@ -662,13 +666,13 @@ pub fn start_agy_turn_blocking(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| format!("turn-{}-{}", ts, (ts % 100000)));
 
-    let home = env::var("HOME").unwrap_or_else(|_| "/Users/jason".to_string());
+    let home = crate::sessions::home_dir();
     let fallback_cwd = {
-        let p = PathBuf::from(&home).join("projects");
+        let p = home.join("projects");
         if p.exists() {
             p.to_string_lossy().into_owned()
         } else {
-            home.clone()
+            home.to_string_lossy().into_owned()
         }
     };
     let valid_cwd = cwd

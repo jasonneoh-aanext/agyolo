@@ -638,7 +638,7 @@ pub fn run_prechecks(check_id: Option<&str>) -> Result<PrechecksReport, String> 
         ));
     }
 
-    let home_dir = env::var("HOME").unwrap_or_else(|_| "/Users/jason".to_string());
+    let home_dir = crate::sessions::home_dir().to_string_lossy().into_owned();
     let path_env = env::var("PATH").unwrap_or_default();
     let agy_cli_dir = Path::new(&home_dir).join(".gemini/antigravity-cli");
     let env_map: HashMap<String, String> = env::vars().collect();

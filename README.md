@@ -1,6 +1,6 @@
 # Antigravity Console (`agy-test`)
 
-A self-running macOS desktop application (**Tauri v2 + Rust**) and web console that wraps the Antigravity CLI (`agy`) using managed pseudo-terminals (PTY), real-time JSONL transcript streaming, automatic permission prompt approval, and interactive `AskQuestion` UI cards.
+A self-running macOS desktop application (**Tauri v2 + Rust**) that wraps the Antigravity CLI (`agy`) using managed pseudo-terminals (PTY), real-time JSONL transcript streaming, automatic permission prompt approval, and interactive `AskQuestion` UI cards.
 
 ---
 
@@ -17,38 +17,33 @@ A self-running macOS desktop application (**Tauri v2 + Rust**) and web console t
 
 ## 1. Architecture Overview
 
-Antigravity Console supports two execution modes from the same frontend (`public/`):
+Antigravity Console runs as a native macOS desktop application built with **Tauri v2** (`src-tauri/`) and a vanilla HTML/CSS/JS frontend (`public/`):
 
-1. **Self-Running macOS Desktop App (Primary, `main` branch):**
-   - Built with **Tauri v2** (`src-tauri/`).
-   - Embeds `public/index.html`, `public/styles.css`, and `public/app.js` directly into the compiled binary.
-   - Communicates exclusively over **Tauri IPC** (`invoke` + `listen`) with **zero localhost ports** and **no Node.js runtime dependency**.
-   - Links only against standard macOS system libraries (`WebKit.framework`, `AppKit.framework`, `/usr/lib/libsqlite3.dylib`, `/usr/lib/libSystem.B.dylib`).
-   - Hydrates the user's login-shell `PATH` on startup (`/bin/zsh -l -c`) so launching `Antigravity Console.app` from Finder or Spotlight finds `~/.local/bin/agy`, `gcloud`, and `node`.
-
-2. **Node.js + Express + `node-pty` Server (Fallback, `node` tag):**
-   - Runs via `node server.js` for browser-based development or automated HTTP/SSE testing (`node test-poc.js`).
+- Embeds `public/index.html`, `public/styles.css`, `public/precheckModal.js`, and `public/app.js` directly into the compiled binary.
+- Communicates exclusively over **Tauri IPC** (`invoke` + `listen`) with **zero localhost ports** and **no Node.js runtime dependency**.
+- Links only against standard macOS system libraries (`WebKit.framework`, `AppKit.framework`, `/usr/lib/libsqlite3.dylib`, `/usr/lib/libSystem.B.dylib`).
+- Hydrates the user's login-shell `PATH` on startup (`/bin/zsh -ilc`) so launching `Antigravity Console.app` from Finder or Spotlight finds `~/.local/bin/agy`, `gh`, and `gcloud`.
 
 ---
 
 ## 2. How Frontend & Backend Communicate
 
-`public/app.js` detects `window.__TAURI__.core.invoke` at runtime and switches between Tauri IPC and HTTP/SSE transparently:
+`public/app.js` and `public/precheckModal.js` communicate directly with the Rust backend via `window.__TAURI__.core.invoke` and `window.__TAURI__.event.listen('agy-turn-event')`:
 
-| Operation | Tauri Desktop Mode (`window.__TAURI__`) | Browser Fallback Mode (`server.js`) |
-| :--- | :--- | :--- |
-| **Startup Prechecks** | `invoke('run_prechecks', { check })` | `GET /api/prechecks` |
-| **List Workspaces** | `invoke('get_workspaces')` | `GET /api/workspaces` |
-| **List Sessions** | `invoke('get_sessions')` | `GET /api/sessions` |
-| **Load Session History** | `invoke('get_session_detail', { sessionId })` | `GET /api/sessions/:id` |
-| **Check Active Turn** | `invoke('get_session_active_state', { sessionId })` | `GET /api/sessions/:id/active` |
-| **Start / Resume Turn** | `invoke('start_chat_turn', { prompt, conversationId, turnId, cwd, approvalInput })` | `POST /api/chat` (SSE response) |
-| **Answer `AskQuestion`** | `invoke('submit_ask_question', { sessionId, turnId, action, answers })` | `POST /api/ask-question` |
-| **Stop Running Turn** | `invoke('stop_chat_turn', { sessionId, turnId })` | N/A |
-| **Real-Time Events** | `event.listen('agy-turn-event', handler)` | `EventSource('/api/sessions/:id/stream')` |
+| Operation | Tauri IPC Command / Event |
+| :--- | :--- |
+| **Startup Prechecks** | `invoke('run_prechecks', { check })` |
+| **List Workspaces** | `invoke('get_workspaces')` |
+| **Native Folder Picker** | `invoke('pick_directory', { initialPath })` |
+| **List Sessions** | `invoke('list_sessions')` |
+| **Load Session History** | `invoke('get_session', { sessionId })` |
+| **Attach Live Turn Stream** | `invoke('attach_session_stream', { sessionId })` |
+| **Start / Resume Turn** | `invoke('start_chat_turn', { prompt, sessionId, conversationId, clientTurnId, cwd, approvalInput })` |
+| **Answer `AskQuestion`** | `invoke('submit_ask_question', { sessionId, turnId, action, answers })` |
+| **Real-Time Events** | `event.listen('agy-turn-event', handler)` |
 
 ### Event Stream Envelope (`agy-turn-event`)
-Every real-time event emitted by the Rust backend carries `{ event, data }`, where `data` always includes `turnId` and `sessionId` so the UI can demultiplex concurrent sessions:
+Every real-time event emitted by the Rust backend carries `{ event, turnId, sessionId, data }` so the UI can demultiplex concurrent sessions:
 - `status`: `{ state, message, progressLabel, turnId, sessionId }`
 - `session`: `{ sessionId, turnId, source }` (emitted as soon as a new session UUID is discovered)
 - `transcript`: `{ sessionId, turnId, items, stepCount, turnState, progressLabel }`
@@ -88,9 +83,9 @@ Because `agy --prompt-interactive "<prompt>"` requires an interactive TTY for TU
 
 ## 4. Turn Lifecycle & Transcript State Machine
 
-Located in `src-tauri/src/turn_state.rs` (and `lib/turnState.js` for Node fallback):
+Located in `src-tauri/src/turn_state.rs`:
 
-- **Session Discovery:** For new sessions, `agy` is passed `--log-file /tmp/agy-turn-<turnId>.log`. The watcher extracts `Created conversation <uuid>` from the log file to locate `~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl` (and `transcript_full.jsonl` when `truncated_fields` is present).
+- **Session Discovery:** For new sessions, `agy` is passed `--log-file /tmp/agy-tauri-<turnId>.log`. The watcher extracts `Created conversation <uuid>` from the log file to locate `~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl` (and `transcript_full.jsonl` when `truncated_fields` is present).
 - **Completion Detection (`is_turn_complete`):**
   - A turn is only considered complete when the latest step after `turn_start_step_index` is a `PLANNER_RESPONSE` with `status == "DONE"`, **no** `tool_calls` are present on that final step, **and** there is no pending background work.
   - Tracks background commands (`run_command` returning `taskId`, `manage_task`), subagents (`invoke_subagent`, `send_message`, `manage_subagents`), and timers/cron jobs (`schedule`, `TimerCondition` early cancellation) across steps, waiting for wakeup `USER_INPUT` / system notifications before sending `Ctrl+D x2` (`\x04`, `\x04`) to exit `agy` cleanly.
@@ -112,28 +107,26 @@ Located in `src-tauri/src/sessions.rs`:
 ├── AGENTS.md                      # Concise agent instructions
 ├── GEMINI.md                      # Concise Gemini/Antigravity context
 ├── README.md                      # Detailed architecture & developer guide
-├── package.json                   # Scripts for both Tauri and Node modes
 ├── scripts/
 │   └── bundle-macos-app.sh        # Builds Rust binary & packages dist/Antigravity Console.app
-├── public/                        # Shared frontend assets (embedded by Tauri)
+├── public/                        # Frontend assets (embedded by Tauri)
 │   ├── index.html
 │   ├── styles.css
-│   └── app.js                     # Dual-transport UI (Tauri IPC + HTTP/SSE fallback)
-├── src-tauri/                     # Tauri v2 Rust backend
-│   ├── Cargo.toml
-│   ├── tauri.conf.json
-│   ├── capabilities/default.json
-│   ├── icons/
-│   └── src/
-│       ├── main.rs                # Binary entrypoint
-│       ├── lib.rs                 # Tauri setup, PATH hydration & command handlers
-│       ├── models.rs              # Serde camelCase structs
-│       ├── pty_manager.rs         # Native openpty manager & turn lifecycle
-│       ├── sessions.rs            # Native libsqlite3 FFI & brain transcript scanner
-│       └── turn_state.rs          # Transcript JSONL parser & background task tracker
-├── server.js                      # Fallback Node.js + Express + node-pty server
-├── lib/turnState.js               # Fallback JS transcript state machine
-└── test-poc.js                    # Automated integration test suite for Node server
+│   ├── precheckModal.js           # Startup prechecks UI modal
+│   └── app.js                     # Tauri IPC frontend controller
+└── src-tauri/                     # Tauri v2 Rust backend
+    ├── Cargo.toml
+    ├── tauri.conf.json
+    ├── capabilities/default.json
+    ├── icons/
+    └── src/
+        ├── main.rs                # Binary entrypoint
+        ├── lib.rs                 # Tauri setup, PATH hydration & command handlers
+        ├── models.rs              # Serde camelCase structs
+        ├── prechecks.rs           # Native startup prechecks (AGY CLI & Auth)
+        ├── pty_manager.rs         # Native openpty manager & turn lifecycle
+        ├── sessions.rs            # Native libsqlite3 FFI, directory picker & brain scanner
+        └── turn_state.rs          # Transcript JSONL parser & background task tracker
 ```
 
 ---
@@ -148,21 +141,18 @@ Located in `src-tauri/src/sessions.rs`:
 ### Commands
 
 ```bash
-# 1. Run Rust unit tests (turn state machine, native openpty roundtrip, permission detection, sessions)
-npm run tauri:test
+# 1. Run Rust unit tests (turn state machine, native openpty roundtrip, permission detection, prechecks, sessions)
+cargo test --offline --manifest-path src-tauri/Cargo.toml
 
 # 2. Build and package the macOS application bundle (dist/Antigravity Console.app)
-npm run tauri:bundle
+./scripts/bundle-macos-app.sh
 
 # 3. Build an optimized release macOS application bundle
-npm run tauri:bundle -- --release
+./scripts/bundle-macos-app.sh --release
 
 # 4. Launch the packaged macOS app
 open "dist/Antigravity Console.app"
 
 # 5. Run the Tauri desktop app directly from cargo
-npm run tauri:run
-
-# 6. Run legacy Node.js Express server (browser fallback mode)
-npm start
+cargo run --offline --manifest-path src-tauri/Cargo.toml
 ```

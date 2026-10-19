@@ -116,7 +116,6 @@ function dismissPrecheckModal() {
 
 async function fetchSinglePrecheck(checkDef) {
   try {
-    let data;
     const tauriInvoke =
       typeof window !== 'undefined' &&
       window.__TAURI__ &&
@@ -125,15 +124,11 @@ async function fetchSinglePrecheck(checkDef) {
         ? window.__TAURI__.core.invoke
         : null;
 
-    if (tauriInvoke) {
-      data = await tauriInvoke('run_prechecks', { check: checkDef.id });
-    } else {
-      const res = await fetch(`/api/prechecks?check=${encodeURIComponent(checkDef.id)}`);
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-      data = await res.json();
+    if (!tauriInvoke) {
+      throw new Error('Tauri IPC runtime (window.__TAURI__.core.invoke) is not available.');
     }
+
+    const data = await tauriInvoke('run_prechecks', { check: checkDef.id });
 
     const matched = Array.isArray(data.checks)
       ? data.checks.find((c) => c.id === checkDef.id) || data.checks[0]
@@ -155,14 +150,14 @@ async function fetchSinglePrecheck(checkDef) {
     return {
       ok: false,
       detail: `No result returned for ${checkDef.title}`,
-      remediation: 'Check server logs and retry.',
+      remediation: 'Check application logs and retry.',
       pauseDurationMs
     };
   } catch (err) {
     return {
       ok: false,
-      detail: `Failed to reach precheck endpoint: ${err instanceof Error ? err.message : String(err)}`,
-      remediation: 'Ensure the Antigravity server is running and accessible.',
+      detail: `Precheck invocation failed: ${err instanceof Error ? err.message : String(err)}`,
+      remediation: 'Ensure the Antigravity Console Tauri backend is running.',
       pauseDurationMs: PRECHECK_PAUSE_MS
     };
   }

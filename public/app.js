@@ -6,14 +6,14 @@ let activeViewKey = NEW_SESSION_KEY;
 // Per-session view state store: Map<key, SessionViewState>
 const sessionStates = new Map();
 
-// Server session summaries from GET /api/sessions
+// Session summaries from Tauri list_sessions IPC command
 let knownSessions = [];
 let defaultWorkspace = '';
 
 // Preserve user's option selections & write-in text per question across live transcript refreshes
 const questionDrafts = new Map();
 
-// Track active SSE stream readers so we don't attach duplicate streams for the same session/turn
+// Track active stream attachments so we don't attach duplicate listeners for the same session/turn
 const activeStreamAttachments = new Set();
 
 // Map of turnId / sessionId -> stateRef ({ current: SessionViewState }) for routing Tauri IPC turn events
@@ -21,13 +21,19 @@ const tauriTurnRefs = new Map();
 
 function isTauriRuntime() {
   return Boolean(
-    window.__TAURI__ &&
+    typeof window !== 'undefined' &&
+      window.__TAURI__ &&
       window.__TAURI__.core &&
       typeof window.__TAURI__.core.invoke === 'function'
   );
 }
 
 function tauriInvoke(cmd, args = {}) {
+  if (!isTauriRuntime()) {
+    return Promise.reject(
+      new Error(`Tauri IPC runtime is unavailable while invoking "${cmd}".`)
+    );
+  }
   return window.__TAURI__.core.invoke(cmd, args);
 }
 
@@ -498,43 +504,18 @@ async function submitAskQuestionCard(itemId, action = 'submit') {
       await sendChat();
     };
 
-    if (isTauriRuntime()) {
-      const res = await tauriInvoke('submit_ask_question', {
-        sessionId: state.sessionId,
-        turnId: state.turnId,
-        action,
-        answers
-      });
-      if (res && res.canResumeAsPrompt && !state.isRunning) {
-        await resumeHistoricalSessionWithAnswer();
-        return;
-      }
-      if (!res || !res.ok) {
-        throw new Error((res && res.error) || 'Failed to submit AskQuestion');
-      }
-      return;
-    }
-
-    const res = await fetch('/api/ask-question', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionId: state.sessionId,
-        turnId: state.turnId,
-        stepIndex: item.stepIndex,
-        action,
-        answers
-      })
+    const res = await tauriInvoke('submit_ask_question', {
+      sessionId: state.sessionId,
+      turnId: state.turnId,
+      action,
+      answers
     });
-
-    if (res.status === 409 && !state.isRunning) {
+    if (res && res.canResumeAsPrompt && !state.isRunning) {
       await resumeHistoricalSessionWithAnswer();
       return;
     }
-
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.error || `Failed to submit AskQuestion (${res.status})`);
+    if (!res || !res.ok) {
+      throw new Error((res && res.error) || 'Failed to submit AskQuestion');
     }
   } catch (err) {
     if (state.isRunning) {
@@ -1090,16 +1071,7 @@ function renderToolGroup(state, group) {
 
 async function loadWorkspaces() {
   try {
-    let data = null;
-    if (isTauriRuntime()) {
-      data = await tauriInvoke('get_workspaces');
-    } else {
-      const res = await fetch('/api/workspaces');
-      if (!res.ok) {
-        throw new Error(`Workspace discovery failed with status ${res.status}`);
-      }
-      data = await res.json();
-    }
+    const data = await tauriInvoke('get_workspaces');
     if (!data) return;
     defaultWorkspace = data.defaultWorkspace || '';
     cwdInput.value = defaultWorkspace;
@@ -1118,22 +1090,7 @@ async function pickWorkspaceDirectory() {
 
   try {
     const initialPath = cwdInput.value.trim() || defaultWorkspace || '';
-    let result = null;
-
-    if (isTauriRuntime()) {
-      result = await tauriInvoke('pick_directory', { initialPath });
-    } else {
-      const res = await fetch('/api/pick-directory', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initialPath })
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(body.error || `Folder picker failed with status ${res.status}`);
-      }
-      result = body;
-    }
+    const result = await tauriInvoke('pick_directory', { initialPath });
 
     if (result && !result.cancelled && result.path) {
       cwdInput.value = result.path;
@@ -1157,14 +1114,7 @@ async function pickWorkspaceDirectory() {
 
 async function refreshSessionList() {
   try {
-    let data = null;
-    if (isTauriRuntime()) {
-      data = await tauriInvoke('list_sessions');
-    } else {
-      const res = await fetch('/api/sessions');
-      if (!res.ok) return;
-      data = await res.json();
-    }
+    const data = await tauriInvoke('list_sessions');
     if (!data) return;
     const sessions = data.sessions || [];
     knownSessions = sessions;
@@ -1208,11 +1158,13 @@ async function refreshSessionList() {
     }
 
     renderSidebar();
-  } catch (_) {}
+  } catch (err) {
+    console.warn('Failed to refresh session list:', err);
+  }
 }
 
 /**
- * Process a single SSE event frame for a target session state.
+ * Process a single Tauri turn event frame for a target session state.
  */
 async function handleSessionSseEvent(stateRef, event, data) {
   let state = stateRef.current;
@@ -1308,38 +1260,6 @@ async function handleSessionSseEvent(stateRef, event, data) {
   }
 }
 
-async function consumeSseResponse(response, stateRef, attachmentKey) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const frames = buffer.split('\n\n');
-      buffer = frames.pop();
-
-      for (const frame of frames) {
-        const lines = frame.split('\n');
-        const evtLine = lines.find((l) => l.startsWith('event: '));
-        const dataLine = lines.find((l) => l.startsWith('data: '));
-        if (!evtLine || !dataLine) continue;
-
-        const event = evtLine.slice(7).trim();
-        const data = JSON.parse(dataLine.slice(6));
-        await handleSessionSseEvent(stateRef, event, data);
-      }
-    }
-  } finally {
-    if (attachmentKey) {
-      activeStreamAttachments.delete(attachmentKey);
-    }
-  }
-}
-
 async function attachToRunningSessionStream(sessionId) {
   if (!sessionId || activeStreamAttachments.has(sessionId)) return;
   activeStreamAttachments.add(sessionId);
@@ -1348,25 +1268,16 @@ async function attachToRunningSessionStream(sessionId) {
   const stateRef = { current: state };
 
   try {
-    if (isTauriRuntime()) {
-      tauriTurnRefs.set(sessionId, stateRef);
-      const res = await tauriInvoke('attach_session_stream', { sessionId });
-      if (!res || !res.attached) {
-        activeStreamAttachments.delete(sessionId);
-        tauriTurnRefs.delete(sessionId);
-      } else if (res.turnId) {
-        tauriTurnRefs.set(res.turnId, stateRef);
-      }
-      return;
-    }
-
-    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/stream`);
-    if (!response.ok) {
+    tauriTurnRefs.set(sessionId, stateRef);
+    const res = await tauriInvoke('attach_session_stream', { sessionId });
+    if (!res || !res.attached) {
       activeStreamAttachments.delete(sessionId);
-      return;
+      tauriTurnRefs.delete(sessionId);
+    } else if (res.turnId) {
+      tauriTurnRefs.set(res.turnId, stateRef);
     }
-    await consumeSseResponse(response, stateRef, sessionId);
-  } catch (_) {
+  } catch (err) {
+    console.warn(`Failed to attach stream for session "${sessionId}":`, err);
     activeStreamAttachments.delete(sessionId);
     tauriTurnRefs.delete(sessionId);
   }
@@ -1439,7 +1350,7 @@ async function loadSession(sessionKey, options = {}) {
   const state = getOrCreateSessionState(sessionKey);
   promptInput.value = state.draftPrompt || '';
 
-  // If this session is already actively streaming in this browser tab, render immediately from memory!
+  // If this session is already actively streaming in this window, render immediately from memory!
   if (state.isRunning && activeStreamAttachments.has(sessionKey)) {
     if (state.workspace) {
       cwdInput.value = state.workspace;
@@ -1463,17 +1374,8 @@ async function loadSession(sessionKey, options = {}) {
   renderSidebar();
 
   try {
-    let data = {};
-    let isNotFound = false;
-
-    if (isTauriRuntime()) {
-      data = (await tauriInvoke('get_session', { sessionId: sessionKey })) || {};
-      isNotFound = Boolean(data.error) || (!data.transcriptPath && !data.isRunning);
-    } else {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionKey)}`);
-      data = await res.json().catch(() => ({}));
-      isNotFound = !res.ok || Boolean(data.error) || (!data.transcriptPath && !data.isRunning);
-    }
+    const data = (await tauriInvoke('get_session', { sessionId: sessionKey })) || {};
+    const isNotFound = Boolean(data.error) || (!data.transcriptPath && !data.isRunning);
 
     if (isNotFound) {
       state.items = [];
@@ -1538,7 +1440,7 @@ async function loadSession(sessionKey, options = {}) {
     renderStream();
     scrollToBottom();
 
-    // If session is running on the server, attach live SSE / Tauri event stream
+    // If session is running in the backend, attach live Tauri event stream
     if (state.isRunning) {
       attachToRunningSessionStream(sessionKey);
     }
@@ -1615,42 +1517,21 @@ async function sendChat() {
   activeStreamAttachments.add(attachmentKey);
 
   try {
-    if (isTauriRuntime()) {
-      tauriTurnRefs.set(clientTurnId, stateRef);
-      if (targetSessionId) {
-        tauriTurnRefs.set(targetSessionId, stateRef);
-      }
-
-      const result = await tauriInvoke('start_chat_turn', {
-        prompt,
-        sessionId: targetSessionId,
-        clientTurnId,
-        cwd
-      });
-
-      if (result && stateRef.current.isRunning) {
-        await handleSessionSseEvent(stateRef, 'exit', result);
-      }
-      return;
+    tauriTurnRefs.set(clientTurnId, stateRef);
+    if (targetSessionId) {
+      tauriTurnRefs.set(targetSessionId, stateRef);
     }
 
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        prompt,
-        sessionId: targetSessionId,
-        clientTurnId,
-        cwd
-      })
+    const result = await tauriInvoke('start_chat_turn', {
+      prompt,
+      sessionId: targetSessionId,
+      clientTurnId,
+      cwd
     });
 
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      throw new Error(errData.error || `Request failed with status ${response.status}`);
+    if (result && stateRef.current.isRunning) {
+      await handleSessionSseEvent(stateRef, 'exit', result);
     }
-
-    await consumeSseResponse(response, stateRef, attachmentKey);
   } catch (err) {
     const st = stateRef.current;
     st.isRunning = false;

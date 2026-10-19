@@ -1,12 +1,3 @@
-# Node dependencies & package caches
-node_modules
-node_modules/
-jspm_packages/
-.npm/
-.pnpm-store/
-.yarn/
-*.tgz
-
 # Build outputs & app bundles
 dist/
 build/
@@ -28,11 +19,6 @@ src-tauri/WixTools/
 # Logs
 logs/
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
 
 # Environment variables
 .env

@@ -17,9 +17,9 @@ use std::sync::Arc;
 use tauri::{AppHandle, RunEvent, State};
 
 /// Ensure macOS GUI launches from Finder/Dock inherit the user's shell PATH
-/// (`~/.local/bin`, `/opt/homebrew/bin`, `~/.cargo/bin`, etc.) so `agy`, `gh`, `gcloud`, and `node` resolve.
+/// (`~/.local/bin`, `/opt/homebrew/bin`, `~/.cargo/bin`, etc.) so `agy`, `gh`, and `gcloud` resolve.
 pub fn hydrate_macos_path() {
-    let home = env::var("HOME").unwrap_or_else(|_| "/Users/jason".to_string());
+    let home = sessions::home_dir().to_string_lossy().into_owned();
     let current_path = env::var("PATH").unwrap_or_default();
 
     let login_shell_path = Command::new("/bin/zsh")
