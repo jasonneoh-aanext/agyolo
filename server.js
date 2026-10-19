@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { parseTranscriptLines } = require('./lib/turnState');
+const { runPrechecks } = require('./lib/prechecks');
 
 const app = express();
 app.use(express.json());
@@ -1005,6 +1006,33 @@ function runAgyTurn({
 }
 
 /**
+ * GET /api/prechecks
+ * Runs startup prechecks (`agy_cli` and `agy_auth`, or a specific check via `?check=<id>`).
+ */
+app.get('/api/prechecks', (req, res) => {
+  try {
+    ensureNodePtySpawnHelperExecutable();
+    const checkId = typeof req.query.check === 'string' ? req.query.check : '';
+    const report = runPrechecks({
+      checkId,
+      agyBin: process.env.AGY_BIN || AGY_BIN,
+      agyCliDir: AGY_CLI_DIR
+    });
+    res.json(report);
+  } catch (err) {
+    const isInvalidId =
+      err && typeof err === 'object' && 'code' in err && err.code === 'INVALID_PRECHECK_ID';
+    res.status(isInvalidId ? 400 : 500).json({
+      ok: false,
+      checkedAt: new Date().toISOString(),
+      pauseDurationMs: 2000,
+      checks: [],
+      error: err instanceof Error ? err.message : String(err)
+    });
+  }
+});
+
+/**
  * GET /api/workspaces
  * Returns preset workspace paths and subdirectories for the path selector.
  */
@@ -1206,4 +1234,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, runAgyTurn, readConversation, listSessions };
+module.exports = { app, runAgyTurn, readConversation, listSessions, runPrechecks };

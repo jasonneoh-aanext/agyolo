@@ -1129,3 +1129,345 @@ body {
   0%, 100% { opacity: 0.35; }
   50% { opacity: 1; }
 }
+
+@keyframes precheckSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Startup Prechecks Modal */
+.precheck-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(6, 8, 12, 0.78);
+  backdrop-filter: blur(10px);
+  opacity: 1;
+  transition: opacity 0.22s ease;
+}
+
+.precheck-modal-backdrop.closing {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.precheck-modal-backdrop.hidden {
+  display: none;
+}
+
+.precheck-modal-card {
+  width: 100%;
+  max-width: 520px;
+  background: var(--bg-surface);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 16px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(88, 148, 255, 0.08);
+  padding: 22px 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.precheck-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.precheck-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.precheck-brand-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+.precheck-modal-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.precheck-modal-subtitle {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.precheck-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border: 1px solid var(--border-subtle);
+}
+
+.precheck-badge.checking {
+  background: rgba(88, 148, 255, 0.12);
+  color: var(--accent-blue);
+  border-color: rgba(88, 148, 255, 0.3);
+}
+
+.precheck-badge.passed {
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--accent-green);
+  border-color: rgba(52, 211, 153, 0.3);
+}
+
+.precheck-badge.failed {
+  background: rgba(239, 68, 68, 0.14);
+  color: var(--accent-red);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.precheck-progress-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.precheck-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.precheck-progress-label {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.precheck-progress-percent {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.precheck-progress-track {
+  width: 100%;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+
+.precheck-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-indigo));
+  transition: width 0.35s cubic-bezier(0.22, 1, 0.36, 1), background 0.25s ease;
+}
+
+.precheck-progress-fill.passed {
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-green));
+}
+
+.precheck-progress-fill.failed {
+  background: linear-gradient(90deg, var(--accent-amber), var(--accent-red));
+}
+
+.precheck-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.precheck-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 11px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.precheck-step.checking {
+  border-color: rgba(88, 148, 255, 0.42);
+  background: rgba(88, 148, 255, 0.05);
+}
+
+.precheck-step.passed {
+  border-color: rgba(52, 211, 153, 0.28);
+  background: rgba(52, 211, 153, 0.04);
+}
+
+.precheck-step.failed {
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.precheck-step-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+  margin-top: 1px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+}
+
+.precheck-step.checking .precheck-step-icon {
+  border: 2px solid rgba(88, 148, 255, 0.25);
+  border-top-color: var(--accent-blue);
+  background: transparent;
+  animation: precheckSpin 0.75s linear infinite;
+}
+
+.precheck-step.passed .precheck-step-icon {
+  background: rgba(52, 211, 153, 0.16);
+  color: var(--accent-green);
+  border-color: rgba(52, 211, 153, 0.35);
+}
+
+.precheck-step.failed .precheck-step-icon {
+  background: rgba(239, 68, 68, 0.18);
+  color: var(--accent-red);
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+.precheck-step-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.precheck-step-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.precheck-step-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.precheck-step-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.precheck-step.checking .precheck-step-status {
+  color: var(--accent-blue);
+}
+
+.precheck-step.passed .precheck-step-status {
+  color: var(--accent-green);
+}
+
+.precheck-step.failed .precheck-step-status {
+  color: var(--accent-red);
+}
+
+.precheck-step-detail {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.precheck-step-remediation {
+  margin-top: 6px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  font-size: 12px;
+  color: #fca5a5;
+}
+
+.precheck-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.precheck-footer-hint {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.precheck-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.precheck-modal-actions.hidden {
+  display: none;
+}
+
+.btn-precheck-primary,
+.btn-precheck-secondary {
+  padding: 6px 13px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.btn-precheck-primary {
+  border: none;
+  background: var(--accent-blue);
+  color: #fff;
+}
+
+.btn-precheck-primary:hover {
+  opacity: 0.9;
+}
+
+.btn-precheck-secondary {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+
+.btn-precheck-secondary:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+

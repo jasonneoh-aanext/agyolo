@@ -85,6 +85,59 @@
     </div>
   </div>
 
+  <!-- Startup Prechecks Modal -->
+  <div
+    id="precheckModal"
+    class="precheck-modal-backdrop"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="precheckModalTitle"
+  >
+    <div class="precheck-modal-card">
+      <div class="precheck-modal-header">
+        <div class="precheck-brand-row">
+          <div class="brand-icon precheck-brand-icon">A</div>
+          <div>
+            <h2 id="precheckModalTitle" class="precheck-modal-title">Startup Prechecks</h2>
+            <p id="precheckModalSubtitle" class="precheck-modal-subtitle">
+              Verifying Antigravity CLI environment before starting...
+            </p>
+          </div>
+        </div>
+        <span id="precheckStatusBadge" class="precheck-badge checking">Checking 1/2</span>
+      </div>
+
+      <div class="precheck-progress-section">
+        <div class="precheck-progress-meta">
+          <span id="precheckProgressLabel" class="precheck-progress-label">
+            Preparing prechecks...
+          </span>
+          <span id="precheckProgressPercent" class="precheck-progress-percent">0%</span>
+        </div>
+        <div class="precheck-progress-track">
+          <div id="precheckProgressFill" class="precheck-progress-fill" style="width: 0%"></div>
+        </div>
+      </div>
+
+      <div id="precheckList" class="precheck-list" role="list"></div>
+
+      <div class="precheck-modal-footer">
+        <span id="precheckFooterHint" class="precheck-footer-hint">
+          Each check pauses for 2s before advancing...
+        </span>
+        <div id="precheckActions" class="precheck-modal-actions hidden">
+          <button id="precheckDismissBtn" class="btn-precheck-secondary" type="button">
+            Continue Anyway
+          </button>
+          <button id="precheckRetryBtn" class="btn-precheck-primary" type="button">
+            Retry Prechecks
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/precheckModal.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

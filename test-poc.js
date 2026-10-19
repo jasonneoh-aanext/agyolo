@@ -2,6 +2,14 @@ const assert = require('assert');
 const http = require('http');
 const { app } = require('./server');
 const { parseTranscriptLines } = require('./lib/turnState');
+const {
+  DEFAULT_PAUSE_DURATION_MS,
+  shortenHomePath,
+  inspectStoredTokenPayload,
+  checkAgyCli,
+  checkAgyAuth,
+  runPrechecks
+} = require('./lib/prechecks');
 
 function httpGet(port, urlPath) {
   return new Promise((resolve, reject) => {
@@ -279,6 +287,162 @@ function runTurnStateUnitTests() {
   console.log('   -> Passed all Turn & Background Lifecycle assertions!');
 }
 
+function runPrecheckUnitTests() {
+  console.log('4. Running Startup Prechecks Unit Tests (agyolo#6)...');
+
+  assert.strictEqual(DEFAULT_PAUSE_DURATION_MS, 2000, 'Default pause duration should be 2000ms (2s)');
+  assert.strictEqual(
+    shortenHomePath('/Users/alice/.local/bin/agy', '/Users/alice'),
+    '~/.local/bin/agy',
+    'Should shorten home directory prefix to ~'
+  );
+
+  // inspectStoredTokenPayload tests
+  const validNested = inspectStoredTokenPayload({
+    token: {
+      access_token: 'ya29.test',
+      refresh_token: '1//refresh',
+      expiry: '2099-01-01T00:00:00Z'
+    },
+    project_id: 'cloud-proj-123',
+    user_tier: 'g1-ultra-tier'
+  });
+  assert.strictEqual(validNested.valid, true);
+  assert.strictEqual(validNested.projectId, 'cloud-proj-123');
+  assert.strictEqual(validNested.userTier, 'g1-ultra-tier');
+
+  const expiredNoRefresh = inspectStoredTokenPayload({
+    access_token: 'ya29.expired',
+    expiry: '2000-01-01T00:00:00Z'
+  });
+  assert.strictEqual(expiredNoRefresh.valid, false);
+  assert.ok(expiredNoRefresh.reason.includes('expired'));
+
+  const emptyPayload = inspectStoredTokenPayload({});
+  assert.strictEqual(emptyPayload.valid, false);
+
+  // checkAgyCli passing scenario
+  const mockExecFs = {
+    statSync(target) {
+      if (target === '/Users/alice/.local/bin/agy') {
+        return { isFile: () => true, mode: 0o755 };
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    }
+  };
+  const cliPass = checkAgyCli({
+    agyBin: '/Users/alice/.local/bin/agy',
+    homeDir: '/Users/alice',
+    env: { PATH: '/usr/bin' },
+    fsModule: mockExecFs,
+    execFileSyncFn: () => 'agy version 1.4.2\n'
+  });
+  assert.strictEqual(cliPass.ok, true);
+  assert.strictEqual(cliPass.status, 'passed');
+  assert.ok(cliPass.detail.includes('1.4.2'));
+  assert.strictEqual(cliPass.remediation, null);
+
+  // checkAgyCli missing scenario
+  const cliMissing = checkAgyCli({
+    agyBin: '/Users/alice/.local/bin/agy',
+    homeDir: '/Users/alice',
+    env: { PATH: '' },
+    fsModule: {
+      statSync() {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      }
+    }
+  });
+  assert.strictEqual(cliMissing.ok, false);
+  assert.strictEqual(cliMissing.status, 'failed');
+  assert.ok(cliMissing.detail.includes('not found'));
+  assert.ok(cliMissing.remediation.includes('Install Antigravity CLI'));
+
+  // checkAgyCli non-executable scenario
+  const cliNotExec = checkAgyCli({
+    agyBin: '/Users/alice/.local/bin/agy',
+    homeDir: '/Users/alice',
+    env: { PATH: '' },
+    fsModule: {
+      statSync() {
+        return { isFile: () => true, mode: 0o644 };
+      }
+    }
+  });
+  assert.strictEqual(cliNotExec.ok, false);
+  assert.ok(cliNotExec.detail.includes('not executable'));
+  assert.ok(cliNotExec.remediation.includes('chmod +x'));
+
+  // checkAgyAuth via stored OAuth token file
+  const tokenFilePath = '/Users/alice/.gemini/antigravity-cli/antigravity-oauth-token';
+  const authPassFile = checkAgyAuth({
+    homeDir: '/Users/alice',
+    agyCliDir: '/Users/alice/.gemini/antigravity-cli',
+    env: {},
+    platform: 'linux',
+    fsModule: {
+      statSync(p) {
+        if (p === tokenFilePath) return { isFile: () => true, size: 512 };
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      },
+      readFileSync(p) {
+        if (p === tokenFilePath) {
+          return JSON.stringify({
+            token: { access_token: 'ya29.valid', refresh_token: '1//ref' },
+            project_id: 'demo-gcp-proj'
+          });
+        }
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      }
+    }
+  });
+  assert.strictEqual(authPassFile.ok, true);
+  assert.strictEqual(authPassFile.status, 'passed');
+  assert.strictEqual(authPassFile.meta.method, 'oauth_token_file');
+  assert.ok(authPassFile.detail.includes('demo-gcp-proj'));
+
+  // checkAgyAuth unauthenticated failure scenario
+  const authFail = checkAgyAuth({
+    homeDir: '/Users/alice',
+    agyCliDir: '/Users/alice/.gemini/antigravity-cli',
+    env: {},
+    platform: 'linux',
+    fsModule: {
+      statSync() {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      },
+      readFileSync() {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      }
+    }
+  });
+  assert.strictEqual(authFail.ok, false);
+  assert.strictEqual(authFail.status, 'failed');
+  assert.ok(authFail.remediation.includes('agy login'));
+
+  // runPrechecks with single check filter
+  const filteredReport = runPrechecks({
+    checkId: 'agy_cli',
+    agyBin: '/Users/alice/.local/bin/agy',
+    homeDir: '/Users/alice',
+    env: { PATH: '' },
+    fsModule: mockExecFs,
+    execFileSyncFn: () => '1.4.2'
+  });
+  assert.strictEqual(filteredReport.ok, true);
+  assert.strictEqual(filteredReport.pauseDurationMs, 2000);
+  assert.strictEqual(filteredReport.checks.length, 1);
+  assert.strictEqual(filteredReport.checks[0].id, 'agy_cli');
+
+  // runPrechecks with unknown checkId should fail loudly with INVALID_PRECHECK_ID
+  assert.throws(
+    () => runPrechecks({ checkId: 'unknown_id' }),
+    (err) => err && err.code === 'INVALID_PRECHECK_ID'
+  );
+
+  console.log('   -> Passed all Startup Prechecks unit assertions!');
+}
+
 async function main() {
   const runLiveAsk = process.argv.includes('--ask');
   const server = app.listen(0, '127.0.0.1', async () => {
@@ -289,12 +453,15 @@ async function main() {
       // 1. Static HTML page and modular assets check
       const indexRes = await httpGet(port, '/');
       const cssRes = await httpGet(port, '/styles.css');
+      const precheckJsRes = await httpGet(port, '/precheckModal.js');
       const jsRes = await httpGet(port, '/app.js');
       assert.strictEqual(indexRes.statusCode, 200);
       assert.strictEqual(cssRes.statusCode, 200);
+      assert.strictEqual(precheckJsRes.statusCode, 200);
       assert.strictEqual(jsRes.statusCode, 200);
+      assert.ok(indexRes.body.includes('id="precheckModal"'), 'index.html should include startup precheck modal');
       console.log(
-        `1. Static Web UI: GET / (${indexRes.body.length}B), /styles.css (${cssRes.body.length}B), /app.js (${jsRes.body.length}B)`
+        `1. Static Web UI: GET / (${indexRes.body.length}B), /styles.css (${cssRes.body.length}B), /precheckModal.js (${precheckJsRes.body.length}B), /app.js (${jsRes.body.length}B)`
       );
 
       // 2. Check sessions list includes live progress metadata fields
@@ -314,8 +481,41 @@ async function main() {
       // 3. Unit tests for background task / wakeup lifecycle
       runTurnStateUnitTests();
 
+      // 4. Unit & HTTP API tests for startup prechecks (agyolo#6)
+      runPrecheckUnitTests();
+
+      const prechecksAllRes = await httpGet(port, '/api/prechecks');
+      assert.strictEqual(prechecksAllRes.statusCode, 200);
+      const prechecksAllData = JSON.parse(prechecksAllRes.body);
+      assert.strictEqual(prechecksAllData.pauseDurationMs, 2000);
+      assert.strictEqual(prechecksAllData.checks.length, 2);
+      assert.deepStrictEqual(
+        prechecksAllData.checks.map((c) => c.id),
+        ['agy_cli', 'agy_auth']
+      );
+
+      const prechecksCliRes = await httpGet(port, '/api/prechecks?check=agy_cli');
+      assert.strictEqual(prechecksCliRes.statusCode, 200);
+      const prechecksCliData = JSON.parse(prechecksCliRes.body);
+      assert.strictEqual(prechecksCliData.checks.length, 1);
+      assert.strictEqual(prechecksCliData.checks[0].id, 'agy_cli');
+
+      const prechecksAuthRes = await httpGet(port, '/api/prechecks?check=agy_auth');
+      assert.strictEqual(prechecksAuthRes.statusCode, 200);
+      const prechecksAuthData = JSON.parse(prechecksAuthRes.body);
+      assert.strictEqual(prechecksAuthData.checks.length, 1);
+      assert.strictEqual(prechecksAuthData.checks[0].id, 'agy_auth');
+
+      const prechecksBadRes = await httpGet(port, '/api/prechecks?check=unknown_id');
+      assert.strictEqual(prechecksBadRes.statusCode, 400);
+      console.log(
+        `5. Prechecks HTTP API (GET /api/prechecks): ok=${prechecksAllData.ok}, checks=${prechecksAllData.checks
+          .map((c) => `${c.id}:${c.status}`)
+          .join(', ')}, pauseDurationMs=${prechecksAllData.pauseDurationMs}ms`
+      );
+
       if (runLiveAsk) {
-        console.log('\n4. Running Live ask_question Roundtrip Test (POST /api/chat -> POST /api/ask-question)...');
+        console.log('\n6. Running Live ask_question Roundtrip Test (POST /api/chat -> POST /api/ask-question)...');
         const turn = await streamChatRequest(
           port,
           {

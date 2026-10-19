@@ -1502,6 +1502,10 @@ setInterval(() => {
 }, 2500);
 
 (async () => {
+  const prechecksPromise =
+    typeof window.runStartupPrechecks === 'function'
+      ? window.runStartupPrechecks()
+      : Promise.resolve();
   const initialSessionId = getSessionParamFromUrl();
   await loadWorkspaces();
   await refreshSessionList();
@@ -1512,4 +1516,5 @@ setInterval(() => {
     renderStream();
     syncComposerAndStatusBar();
   }
+  await prechecksPromise;
 })();
