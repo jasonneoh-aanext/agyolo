@@ -19,7 +19,7 @@ A self-running macOS desktop application (**Tauri v2 + Rust**) and web console t
 
 Antigravity Console supports two execution modes from the same frontend (`public/`):
 
-1. **Self-Running macOS Desktop App (Primary, `rust` branch):**
+1. **Self-Running macOS Desktop App (Primary, `main` branch):**
    - Built with **Tauri v2** (`src-tauri/`).
    - Embeds `public/index.html`, `public/styles.css`, and `public/app.js` directly into the compiled binary.
    - Communicates exclusively over **Tauri IPC** (`invoke` + `listen`) with **zero localhost ports** and **no Node.js runtime dependency**.
@@ -37,6 +37,7 @@ Antigravity Console supports two execution modes from the same frontend (`public
 
 | Operation | Tauri Desktop Mode (`window.__TAURI__`) | Browser Fallback Mode (`server.js`) |
 | :--- | :--- | :--- |
+| **Startup Prechecks** | `invoke('run_prechecks', { check })` | `GET /api/prechecks` |
 | **List Workspaces** | `invoke('get_workspaces')` | `GET /api/workspaces` |
 | **List Sessions** | `invoke('get_sessions')` | `GET /api/sessions` |
 | **Load Session History** | `invoke('get_session_detail', { sessionId })` | `GET /api/sessions/:id` |
