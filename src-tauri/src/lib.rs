@@ -239,6 +239,8 @@ async fn start_chat_turn(
     client_turn_id: Option<String>,
     cwd: Option<String>,
     approval_input: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<TurnExitResult, String> {
@@ -278,6 +280,8 @@ async fn start_chat_turn(
             client_turn_id,
             cwd,
             approval_input,
+            model,
+            effort,
         )
     })
     .await

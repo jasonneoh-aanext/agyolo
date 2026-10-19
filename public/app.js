@@ -102,11 +102,144 @@ const pathSelectorGroup = document.getElementById('pathSelectorGroup');
 const browsePathBtn = document.getElementById('browsePathBtn');
 const newSessionBtn = document.getElementById('newSessionBtn');
 const promptInput = document.getElementById('promptInput');
+const modelToggleBtn = document.getElementById('modelToggleBtn');
+const modelToggleLabel = document.getElementById('modelToggleLabel');
+const effortToggleBtn = document.getElementById('effortToggleBtn');
+const effortToggleLabel = document.getElementById('effortToggleLabel');
 const sendBtn = document.getElementById('sendBtn');
 const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 
 let isPickingDirectory = false;
+
+const STORAGE_KEY_MODEL = 'agy.selectedModel';
+const STORAGE_KEY_EFFORT = 'agy.selectedEffort';
+
+const MODEL_CATALOG = [
+  {
+    id: 'gemini-4-argon',
+    label: 'Gemini 4 Argon',
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'high'
+  },
+  {
+    id: 'gemini-3.8-flash',
+    label: 'Gemini 3.8 Flash',
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'high'
+  },
+  {
+    id: 'gemini-3.1-pro',
+    label: 'Gemini 3.1 Pro',
+    efforts: ['low', 'high'],
+    defaultEffort: 'high'
+  },
+  {
+    id: 'gemini-3.1-flash-lite',
+    label: 'Gemini 3.1 Flash Lite',
+    efforts: [],
+    defaultEffort: null
+  },
+  {
+    id: 'claude-sonnet-5-5',
+    label: 'Claude Sonnet 5.5',
+    efforts: ['low', 'medium', 'high', 'max'],
+    defaultEffort: 'high'
+  },
+  {
+    id: 'claude-opus-5-5',
+    label: 'Claude Opus 5.5',
+    efforts: ['low', 'medium', 'high', 'max'],
+    defaultEffort: 'high'
+  }
+];
+
+const EFFORT_LABELS = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  max: 'Max'
+};
+
+function readStoredValue(key) {
+  try {
+    return window.localStorage ? window.localStorage.getItem(key) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeStoredValue(key, value) {
+  try {
+    if (!window.localStorage) return;
+    if (value === null || value === undefined || value === '') {
+      window.localStorage.removeItem(key);
+    } else {
+      window.localStorage.setItem(key, String(value));
+    }
+  } catch (_) {
+    // Ignore storage write errors in restricted webviews
+  }
+}
+
+function resolveModelConfig(modelId) {
+  return MODEL_CATALOG.find((entry) => entry.id === modelId) || MODEL_CATALOG[0];
+}
+
+let selectedModel = resolveModelConfig(readStoredValue(STORAGE_KEY_MODEL)).id;
+let selectedEffort = (() => {
+  const stored = readStoredValue(STORAGE_KEY_EFFORT);
+  const config = resolveModelConfig(selectedModel);
+  if (stored && config.efforts.includes(stored)) {
+    return stored;
+  }
+  return config.defaultEffort || 'high';
+})();
+
+function getSelectedModelConfig() {
+  return resolveModelConfig(selectedModel);
+}
+
+function getEffectiveEffort() {
+  const config = getSelectedModelConfig();
+  if (!config.efforts || config.efforts.length === 0) {
+    return null;
+  }
+  if (selectedEffort && config.efforts.includes(selectedEffort)) {
+    return selectedEffort;
+  }
+  return config.defaultEffort || config.efforts[0];
+}
+
+function cycleModelSelection(step = 1) {
+  if (getActiveState().isRunning) return;
+  const currentIdx = MODEL_CATALOG.findIndex((entry) => entry.id === selectedModel);
+  const baseIdx = currentIdx >= 0 ? currentIdx : 0;
+  const nextIdx = (baseIdx + step + MODEL_CATALOG.length) % MODEL_CATALOG.length;
+  const nextConfig = MODEL_CATALOG[nextIdx];
+  selectedModel = nextConfig.id;
+  writeStoredValue(STORAGE_KEY_MODEL, selectedModel);
+
+  if (nextConfig.efforts.length > 0 && !nextConfig.efforts.includes(selectedEffort)) {
+    selectedEffort = nextConfig.defaultEffort || nextConfig.efforts[0];
+    writeStoredValue(STORAGE_KEY_EFFORT, selectedEffort);
+  }
+
+  syncComposerAndStatusBar();
+}
+
+function cycleEffortSelection(step = 1) {
+  if (getActiveState().isRunning) return;
+  const config = getSelectedModelConfig();
+  if (!config.efforts || config.efforts.length === 0) return;
+  const currentEffort = getEffectiveEffort();
+  const currentIdx = config.efforts.indexOf(currentEffort);
+  const baseIdx = currentIdx >= 0 ? currentIdx : 0;
+  const nextIdx = (baseIdx + step + config.efforts.length) % config.efforts.length;
+  selectedEffort = config.efforts[nextIdx];
+  writeStoredValue(STORAGE_KEY_EFFORT, selectedEffort);
+  syncComposerAndStatusBar();
+}
 
 function createSessionState(key, overrides = {}) {
   return {
@@ -256,8 +389,35 @@ function syncComposerAndStatusBar() {
   }
   statusDot.className = 'dot ' + dotClass;
 
+  const modelConfig = getSelectedModelConfig();
+  const effectiveEffort = getEffectiveEffort();
+  const isTurnRunning = Boolean(state.isRunning);
+
+  if (modelToggleLabel) {
+    modelToggleLabel.textContent = modelConfig.label;
+  }
+  if (modelToggleBtn) {
+    modelToggleBtn.disabled = isTurnRunning;
+    modelToggleBtn.dataset.model = modelConfig.id;
+    modelToggleBtn.title = `Model: ${modelConfig.label} (click to cycle)`;
+  }
+
+  if (effortToggleLabel) {
+    effortToggleLabel.textContent = effectiveEffort
+      ? EFFORT_LABELS[effectiveEffort] || effectiveEffort
+      : 'Auto';
+  }
+  if (effortToggleBtn) {
+    const hasAdjustableEffort = Boolean(modelConfig.efforts && modelConfig.efforts.length > 0);
+    effortToggleBtn.disabled = isTurnRunning || !hasAdjustableEffort;
+    effortToggleBtn.dataset.effort = effectiveEffort || 'none';
+    effortToggleBtn.title = hasAdjustableEffort
+      ? `Reasoning effort: ${EFFORT_LABELS[effectiveEffort] || effectiveEffort} (click to cycle)`
+      : `Reasoning effort is fixed for ${modelConfig.label}`;
+  }
+
   // Composer is only disabled for the session that is currently running
-  sendBtn.disabled = Boolean(state.isRunning);
+  sendBtn.disabled = isTurnRunning;
 }
 
 function renderSidebar() {
@@ -1588,11 +1748,16 @@ async function sendChat() {
       tauriTurnRefs.set(targetSessionId, stateRef);
     }
 
+    const modelConfig = getSelectedModelConfig();
+    const effort = getEffectiveEffort();
+
     const result = await tauriInvoke('start_chat_turn', {
       prompt,
       sessionId: targetSessionId,
       clientTurnId,
-      cwd
+      cwd,
+      model: modelConfig.id,
+      effort
     });
 
     if (result && stateRef.current.isRunning) {
@@ -1653,6 +1818,18 @@ cwdInput.addEventListener('keydown', (e) => {
   }
 });
 
+if (modelToggleBtn) {
+  modelToggleBtn.addEventListener('click', (e) => {
+    cycleModelSelection(e.shiftKey ? -1 : 1);
+  });
+}
+
+if (effortToggleBtn) {
+  effortToggleBtn.addEventListener('click', (e) => {
+    cycleEffortSelection(e.shiftKey ? -1 : 1);
+  });
+}
+
 sendBtn.addEventListener('click', sendChat);
 
 promptInput.addEventListener('input', () => {
@@ -1681,6 +1858,7 @@ setInterval(() => {
 }, 2500);
 
 (async () => {
+  syncComposerAndStatusBar();
   const prechecksPromise =
     typeof window.runStartupPrechecks === 'function'
       ? window.runStartupPrechecks()

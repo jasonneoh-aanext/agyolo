@@ -649,6 +649,45 @@ pub fn get_gcp_project() -> String {
     env::var("GOOGLE_CLOUD_PROJECT").unwrap_or_else(|_| "next-gemini-ent-prd".to_string())
 }
 
+const VALID_AGY_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+pub fn model_supports_effort(model: &str) -> bool {
+    !model.trim().eq_ignore_ascii_case("gemini-3.1-flash-lite")
+}
+
+pub fn build_agy_cli_args(
+    conversation_id: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    log_file: &Path,
+    prompt: &str,
+) -> Vec<String> {
+    let mut args = vec!["--dangerously-skip-permissions".to_string()];
+    if let Some(cid) = conversation_id.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push(format!("--conversation={}", cid));
+    }
+    let normalized_model = model.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(m) = normalized_model {
+        args.push("--model".to_string());
+        args.push(m.to_string());
+    }
+    let can_pass_effort = normalized_model.map(model_supports_effort).unwrap_or(true);
+    if can_pass_effort {
+        if let Some(e) = effort.map(str::trim).filter(|s| !s.is_empty()) {
+            let lower = e.to_ascii_lowercase();
+            if VALID_AGY_EFFORTS.contains(&lower.as_str()) {
+                args.push("--effort".to_string());
+                args.push(lower);
+            }
+        }
+    }
+    args.push("--log-file".to_string());
+    args.push(log_file.to_string_lossy().into_owned());
+    args.push("--prompt-interactive".to_string());
+    args.push(prompt.to_string());
+    args
+}
+
 pub fn start_agy_turn_blocking(
     app_state: Arc<AppState>,
     app_handle: Option<AppHandle>,
@@ -657,6 +696,8 @@ pub fn start_agy_turn_blocking(
     client_turn_id: Option<String>,
     cwd: Option<String>,
     approval_input: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
 ) -> Result<TurnExitResult, String> {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -699,16 +740,13 @@ pub fn start_agy_turn_blocking(
         ));
     }
 
-    let mut args = vec!["--dangerously-skip-permissions".to_string()];
-    if let Some(ref cid) = conversation_id {
-        if !cid.trim().is_empty() {
-            args.push(format!("--conversation={}", cid));
-        }
-    }
-    args.push("--log-file".to_string());
-    args.push(tmp_log_file.to_string_lossy().into_owned());
-    args.push("--prompt-interactive".to_string());
-    args.push(prompt.clone());
+    let args = build_agy_cli_args(
+        conversation_id.as_deref(),
+        model.as_deref(),
+        effort.as_deref(),
+        &tmp_log_file,
+        &prompt,
+    );
 
     let mut master_fd: i32 = -1;
     let mut slave_fd: i32 = -1;
@@ -1650,6 +1688,88 @@ mod tests {
         }
         let _ = child.wait();
         assert!(output.contains("pty-roundtrip-ok"));
+    }
+
+    #[test]
+    fn test_build_agy_cli_args_with_and_without_model_and_effort() {
+        let log_path = Path::new("/tmp/agy-test.log");
+
+        let minimal = build_agy_cli_args(None, None, None, log_path, "hello");
+        assert_eq!(
+            minimal,
+            vec![
+                "--dangerously-skip-permissions",
+                "--log-file",
+                "/tmp/agy-test.log",
+                "--prompt-interactive",
+                "hello",
+            ]
+        );
+
+        let full = build_agy_cli_args(
+            Some("11111111-2222-3333-4444-555555555555"),
+            Some("gemini-4-argon"),
+            Some("high"),
+            log_path,
+            "implement feature",
+        );
+        assert_eq!(
+            full,
+            vec![
+                "--dangerously-skip-permissions",
+                "--conversation=11111111-2222-3333-4444-555555555555",
+                "--model",
+                "gemini-4-argon",
+                "--effort",
+                "high",
+                "--log-file",
+                "/tmp/agy-test.log",
+                "--prompt-interactive",
+                "implement feature",
+            ]
+        );
+
+        let fixed_effort_model = build_agy_cli_args(
+            None,
+            Some("gemini-3.1-flash-lite"),
+            Some("high"),
+            log_path,
+            "quick check",
+        );
+        assert_eq!(
+            fixed_effort_model,
+            vec![
+                "--dangerously-skip-permissions",
+                "--model",
+                "gemini-3.1-flash-lite",
+                "--log-file",
+                "/tmp/agy-test.log",
+                "--prompt-interactive",
+                "quick check",
+            ]
+        );
+
+        let normalized_and_invalid_effort = build_agy_cli_args(
+            None,
+            Some("claude-opus-5-5"),
+            Some("MAX"),
+            log_path,
+            "deep review",
+        );
+        assert_eq!(
+            normalized_and_invalid_effort,
+            vec![
+                "--dangerously-skip-permissions",
+                "--model",
+                "claude-opus-5-5",
+                "--effort",
+                "max",
+                "--log-file",
+                "/tmp/agy-test.log",
+                "--prompt-interactive",
+                "deep review",
+            ]
+        );
     }
 }
 
