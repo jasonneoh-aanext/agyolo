@@ -104,7 +104,30 @@
               <span id="statusDot" class="dot done"></span>
               <span id="statusText">Idle · Ready</span>
             </div>
-            <button id="sendBtn" class="btn-send" type="button">Send ↵</button>
+            <div class="composer-actions">
+              <button
+                id="modelToggleBtn"
+                class="pill composer-pill-toggle model-pill-toggle"
+                type="button"
+                title="Model: Gemini 4 Argon (click to cycle)"
+                aria-label="Toggle model"
+              >
+                <span class="pill-toggle-prefix">Model</span>
+                <span id="modelToggleLabel" class="pill-toggle-value">Gemini 4 Argon</span>
+              </button>
+              <button
+                id="effortToggleBtn"
+                class="pill composer-pill-toggle effort-pill-toggle"
+                type="button"
+                data-effort="high"
+                title="Reasoning effort: High (click to cycle)"
+                aria-label="Toggle reasoning effort"
+              >
+                <span class="pill-toggle-prefix">Effort</span>
+                <span id="effortToggleLabel" class="pill-toggle-value">High</span>
+              </button>
+              <button id="sendBtn" class="btn-send" type="button">Send ↵</button>
+            </div>
           </div>
         </div>
       </footer>

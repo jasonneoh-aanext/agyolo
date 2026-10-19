@@ -761,6 +761,35 @@ mod tests {
             "#browsePathBtn must be inside .composer-wrap above .composer-box"
         );
 
+        // Model and effort pill toggles are inside .composer-footer / .composer-actions beside #sendBtn
+        let styles_css = fs::read_to_string(public_dir.join("styles.css"))
+            .expect("public/styles.css should exist");
+        let composer_footer_idx = index_html
+            .find("class=\"composer-footer\"")
+            .expect(".composer-footer should exist");
+        let composer_actions_idx = index_html
+            .find("class=\"composer-actions\"")
+            .expect(".composer-actions should exist");
+        let model_toggle_idx = index_html
+            .find("id=\"modelToggleBtn\"")
+            .expect("#modelToggleBtn should exist");
+        let effort_toggle_idx = index_html
+            .find("id=\"effortToggleBtn\"")
+            .expect("#effortToggleBtn should exist");
+        let send_btn_idx = index_html
+            .find("id=\"sendBtn\"")
+            .expect("#sendBtn should exist");
+        assert!(
+            composer_footer_idx < composer_actions_idx
+                && composer_actions_idx < model_toggle_idx
+                && model_toggle_idx < effort_toggle_idx
+                && effort_toggle_idx < send_btn_idx,
+            "#modelToggleBtn and #effortToggleBtn must be inside .composer-actions beside #sendBtn"
+        );
+        assert!(styles_css.contains(".composer-pill-toggle"));
+        assert!(app_js.contains("cycleModelSelection"));
+        assert!(app_js.contains("cycleEffortSelection"));
+
         // Frontend scripts use Tauri IPC exclusively with zero legacy /api/ HTTP fallbacks
         assert!(app_js.contains("__TAURI__"));
         assert!(!app_js.contains("/api/"));
