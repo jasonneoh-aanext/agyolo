@@ -6,7 +6,11 @@
   "scripts": {
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true",
     "start": "node server.js",
-    "test": "node test-poc.js"
+    "test": "node test-poc.js",
+    "tauri:test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "tauri:run": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "tauri:build": "cargo build --release --manifest-path src-tauri/Cargo.toml",
+    "tauri:bundle": "bash scripts/bundle-macos-app.sh"
   },
   "keywords": [],
   "author": "",

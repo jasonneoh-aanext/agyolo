@@ -116,11 +116,25 @@ function dismissPrecheckModal() {
 
 async function fetchSinglePrecheck(checkDef) {
   try {
-    const res = await fetch(`/api/prechecks?check=${encodeURIComponent(checkDef.id)}`);
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+    let data;
+    const tauriInvoke =
+      typeof window !== 'undefined' &&
+      window.__TAURI__ &&
+      window.__TAURI__.core &&
+      typeof window.__TAURI__.core.invoke === 'function'
+        ? window.__TAURI__.core.invoke
+        : null;
+
+    if (tauriInvoke) {
+      data = await tauriInvoke('run_prechecks', { check: checkDef.id });
+    } else {
+      const res = await fetch(`/api/prechecks?check=${encodeURIComponent(checkDef.id)}`);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      data = await res.json();
     }
-    const data = await res.json();
+
     const matched = Array.isArray(data.checks)
       ? data.checks.find((c) => c.id === checkDef.id) || data.checks[0]
       : null;
