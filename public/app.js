@@ -16,6 +16,73 @@ const questionDrafts = new Map();
 // Track active SSE stream readers so we don't attach duplicate streams for the same session/turn
 const activeStreamAttachments = new Set();
 
+// Map of turnId / sessionId -> stateRef ({ current: SessionViewState }) for routing Tauri IPC turn events
+const tauriTurnRefs = new Map();
+
+function isTauriRuntime() {
+  return Boolean(
+    window.__TAURI__ &&
+      window.__TAURI__.core &&
+      typeof window.__TAURI__.core.invoke === 'function'
+  );
+}
+
+function tauriInvoke(cmd, args = {}) {
+  return window.__TAURI__.core.invoke(cmd, args);
+}
+
+async function setupTauriEventListener() {
+  if (
+    !isTauriRuntime() ||
+    !window.__TAURI__.event ||
+    typeof window.__TAURI__.event.listen !== 'function'
+  ) {
+    return;
+  }
+
+  await window.__TAURI__.event.listen('agy-turn-event', async (evt) => {
+    const payload = evt && evt.payload;
+    if (!payload || !payload.event) return;
+    const { event, data = {} } = payload;
+    const turnId = data.turnId || null;
+    const sessionId = data.sessionId || null;
+
+    let stateRef =
+      (turnId && tauriTurnRefs.get(turnId)) ||
+      (sessionId && tauriTurnRefs.get(sessionId)) ||
+      null;
+
+    if (!stateRef) {
+      const targetKey = sessionId || turnId;
+      if (!targetKey) return;
+      const state = getOrCreateSessionState(targetKey, {
+        sessionId: sessionId || null,
+        turnId: turnId || null
+      });
+      stateRef = { current: state };
+      if (turnId) tauriTurnRefs.set(turnId, stateRef);
+      if (sessionId) tauriTurnRefs.set(sessionId, stateRef);
+    }
+
+    if (sessionId && !tauriTurnRefs.has(sessionId)) {
+      tauriTurnRefs.set(sessionId, stateRef);
+    }
+
+    await handleSessionSseEvent(stateRef, event, data);
+
+    if (event === 'exit' || event === 'error') {
+      if (turnId) {
+        tauriTurnRefs.delete(turnId);
+        activeStreamAttachments.delete(turnId);
+      }
+      if (sessionId) {
+        tauriTurnRefs.delete(sessionId);
+        activeStreamAttachments.delete(sessionId);
+      }
+    }
+  });
+}
+
 const streamEl = document.getElementById('stream');
 const viewportEl = document.getElementById('viewport');
 const sidebarEl = document.getElementById('sidebar');
@@ -95,6 +162,9 @@ function migrateSessionKey(oldKey, newSessionId) {
   if (activeStreamAttachments.has(oldKey)) {
     activeStreamAttachments.add(newSessionId);
   }
+  if (tauriTurnRefs.has(oldKey)) {
+    tauriTurnRefs.set(newSessionId, tauriTurnRefs.get(oldKey));
+  }
 
   if (activeViewKey === oldKey) {
     activeViewKey = newSessionId;
@@ -111,13 +181,17 @@ function getSessionParamFromUrl() {
 }
 
 function syncSessionUrlParam(sessionId) {
-  const url = new URL(window.location.href);
-  if (sessionId && !sessionId.startsWith('turn-') && sessionId !== NEW_SESSION_KEY) {
-    url.searchParams.set('session', sessionId);
-  } else {
-    url.searchParams.delete('session');
+  try {
+    const url = new URL(window.location.href);
+    if (sessionId && !sessionId.startsWith('turn-') && sessionId !== NEW_SESSION_KEY) {
+      url.searchParams.set('session', sessionId);
+    } else {
+      url.searchParams.delete('session');
+    }
+    window.history.replaceState({}, '', url);
+  } catch (_) {
+    // Ignore history API restrictions in custom schemes
   }
-  window.history.replaceState({}, '', url);
 }
 
 function escapeHtml(str) {
@@ -408,6 +482,36 @@ async function submitAskQuestionCard(itemId, action = 'submit') {
   renderSidebar();
 
   try {
+    const resumeHistoricalSessionWithAnswer = async () => {
+      const summaryLines = questions.map((q, qIdx) => {
+        if (action === 'skip') return 'Skip';
+        const ans = answers[qIdx];
+        if (ans.writeIn) return ans.writeIn;
+        const opts = q.options || [];
+        return ans.selectedIndices.map((i) => opts[i]).filter(Boolean).join(', ') || opts[0] || '';
+      });
+      promptInput.value = summaryLines.join('\n');
+      state.draftPrompt = promptInput.value;
+      await sendChat();
+    };
+
+    if (isTauriRuntime()) {
+      const res = await tauriInvoke('submit_ask_question', {
+        sessionId: state.sessionId,
+        turnId: state.turnId,
+        action,
+        answers
+      });
+      if (res && res.canResumeAsPrompt && !state.isRunning) {
+        await resumeHistoricalSessionWithAnswer();
+        return;
+      }
+      if (!res || !res.ok) {
+        throw new Error((res && res.error) || 'Failed to submit AskQuestion');
+      }
+      return;
+    }
+
     const res = await fetch('/api/ask-question', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -421,18 +525,7 @@ async function submitAskQuestionCard(itemId, action = 'submit') {
     });
 
     if (res.status === 409 && !state.isRunning) {
-      // Historical session where the previous PTY exited before AskQuestion was answered:
-      // Resume the session directly with the user's chosen answer text!
-      const summaryLines = questions.map((q, qIdx) => {
-        if (action === 'skip') return 'Skip';
-        const ans = answers[qIdx];
-        if (ans.writeIn) return ans.writeIn;
-        const opts = q.options || [];
-        return ans.selectedIndices.map((i) => opts[i]).filter(Boolean).join(', ') || opts[0] || '';
-      });
-      promptInput.value = summaryLines.join('\n');
-      state.draftPrompt = promptInput.value;
-      await sendChat();
+      await resumeHistoricalSessionWithAnswer();
       return;
     }
 
@@ -441,8 +534,11 @@ async function submitAskQuestionCard(itemId, action = 'submit') {
       throw new Error(errData.error || `Failed to submit AskQuestion (${res.status})`);
     }
   } catch (err) {
+    if (state.isRunning) {
+      state.hasPendingQuestion = true;
+    }
     state.statusState = 'error';
-    state.statusMessage = `Error: ${err.message}`;
+    state.statusMessage = `Error: ${err.message || String(err)}`;
     state.progressLabel = state.statusMessage;
     syncComposerAndStatusBar();
     renderSidebar();
@@ -991,9 +1087,15 @@ function renderToolGroup(state, group) {
 
 async function loadWorkspaces() {
   try {
-    const res = await fetch('/api/workspaces');
-    if (!res.ok) return;
-    const data = await res.json();
+    let data = null;
+    if (isTauriRuntime()) {
+      data = await tauriInvoke('get_workspaces');
+    } else {
+      const res = await fetch('/api/workspaces');
+      if (!res.ok) return;
+      data = await res.json();
+    }
+    if (!data) return;
     defaultWorkspace = data.defaultWorkspace || '';
     cwdInput.value = defaultWorkspace;
     workspacePresetsEl.innerHTML = (data.workspaces || [])
@@ -1004,9 +1106,15 @@ async function loadWorkspaces() {
 
 async function refreshSessionList() {
   try {
-    const res = await fetch('/api/sessions');
-    if (!res.ok) return;
-    const data = await res.json();
+    let data = null;
+    if (isTauriRuntime()) {
+      data = await tauriInvoke('list_sessions');
+    } else {
+      const res = await fetch('/api/sessions');
+      if (!res.ok) return;
+      data = await res.json();
+    }
+    if (!data) return;
     const sessions = data.sessions || [];
     knownSessions = sessions;
 
@@ -1189,6 +1297,18 @@ async function attachToRunningSessionStream(sessionId) {
   const stateRef = { current: state };
 
   try {
+    if (isTauriRuntime()) {
+      tauriTurnRefs.set(sessionId, stateRef);
+      const res = await tauriInvoke('attach_session_stream', { sessionId });
+      if (!res || !res.attached) {
+        activeStreamAttachments.delete(sessionId);
+        tauriTurnRefs.delete(sessionId);
+      } else if (res.turnId) {
+        tauriTurnRefs.set(res.turnId, stateRef);
+      }
+      return;
+    }
+
     const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/stream`);
     if (!response.ok) {
       activeStreamAttachments.delete(sessionId);
@@ -1197,6 +1317,7 @@ async function attachToRunningSessionStream(sessionId) {
     await consumeSseResponse(response, stateRef, sessionId);
   } catch (_) {
     activeStreamAttachments.delete(sessionId);
+    tauriTurnRefs.delete(sessionId);
   }
 }
 
@@ -1284,9 +1405,17 @@ async function loadSession(sessionKey, options = {}) {
   renderSidebar();
 
   try {
-    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionKey)}`);
-    const data = await res.json().catch(() => ({}));
-    const isNotFound = !res.ok || Boolean(data.error) || (!data.transcriptPath && !data.isRunning);
+    let data = {};
+    let isNotFound = false;
+
+    if (isTauriRuntime()) {
+      data = (await tauriInvoke('get_session', { sessionId: sessionKey })) || {};
+      isNotFound = Boolean(data.error) || (!data.transcriptPath && !data.isRunning);
+    } else {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionKey)}`);
+      data = await res.json().catch(() => ({}));
+      isNotFound = !res.ok || Boolean(data.error) || (!data.transcriptPath && !data.isRunning);
+    }
 
     if (isNotFound) {
       state.items = [];
@@ -1350,7 +1479,7 @@ async function loadSession(sessionKey, options = {}) {
     renderStream();
     scrollToBottom();
 
-    // If session is running on the server, attach live SSE stream
+    // If session is running on the server, attach live SSE / Tauri event stream
     if (state.isRunning) {
       attachToRunningSessionStream(sessionKey);
     }
@@ -1359,10 +1488,10 @@ async function loadSession(sessionKey, options = {}) {
     state.permissions = [];
     state.isRunning = false;
     state.statusState = 'error';
-    state.statusMessage = `Error: ${err.message}`;
+    state.statusMessage = `Error: ${err.message || String(err)}`;
     state.sessionError = {
       sessionId: sessionKey,
-      message: err.message || `Failed to load session "${sessionKey}"`
+      message: (err && err.message) || String(err) || `Failed to load session "${sessionKey}"`
     };
     syncComposerAndStatusBar();
     renderSidebar();
@@ -1427,6 +1556,25 @@ async function sendChat() {
   activeStreamAttachments.add(attachmentKey);
 
   try {
+    if (isTauriRuntime()) {
+      tauriTurnRefs.set(clientTurnId, stateRef);
+      if (targetSessionId) {
+        tauriTurnRefs.set(targetSessionId, stateRef);
+      }
+
+      const result = await tauriInvoke('start_chat_turn', {
+        prompt,
+        sessionId: targetSessionId,
+        clientTurnId,
+        cwd
+      });
+
+      if (result && stateRef.current.isRunning) {
+        await handleSessionSseEvent(stateRef, 'exit', result);
+      }
+      return;
+    }
+
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1448,14 +1596,16 @@ async function sendChat() {
     const st = stateRef.current;
     st.isRunning = false;
     st.statusState = 'error';
-    st.statusMessage = `Error: ${err.message}`;
+    st.statusMessage = `Error: ${(err && err.message) || String(err)}`;
     st.progressLabel = st.statusMessage;
   } finally {
     const st = stateRef.current;
     st.isRunning = false;
     activeStreamAttachments.delete(attachmentKey);
+    tauriTurnRefs.delete(clientTurnId);
     if (st.sessionId) {
       activeStreamAttachments.delete(st.sessionId);
+      tauriTurnRefs.delete(st.sessionId);
     }
     renderSidebar();
     if (activeViewKey === st.key) {
@@ -1502,6 +1652,7 @@ setInterval(() => {
 }, 2500);
 
 (async () => {
+  await setupTauriEventListener();
   const initialSessionId = getSessionParamFromUrl();
   if (initialSessionId) {
     activeViewKey = initialSessionId;
