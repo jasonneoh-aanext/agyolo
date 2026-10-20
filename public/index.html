@@ -105,27 +105,65 @@
               <span id="statusText">Idle · Ready</span>
             </div>
             <div class="composer-actions">
-              <button
-                id="modelToggleBtn"
-                class="pill composer-pill-toggle model-pill-toggle"
-                type="button"
-                title="Model: Gemini 4 Argon (click to cycle)"
-                aria-label="Toggle model"
+              <div
+                id="modelToggleGroup"
+                class="pill composer-pill-group model-pill-group"
+                role="group"
+                aria-label="Model selection"
               >
-                <span class="pill-toggle-prefix">Model</span>
-                <span id="modelToggleLabel" class="pill-toggle-value">Gemini 4 Argon</span>
-              </button>
-              <button
-                id="effortToggleBtn"
-                class="pill composer-pill-toggle effort-pill-toggle"
-                type="button"
-                data-effort="high"
-                title="Reasoning effort: High (click to cycle)"
-                aria-label="Toggle reasoning effort"
+                <button
+                  type="button"
+                  class="composer-pill-option"
+                  data-model="gemini-3.8-flash"
+                  title="Model: Gemini 3.8 Flash"
+                  aria-pressed="false"
+                >
+                  Flash
+                </button>
+                <button
+                  type="button"
+                  class="composer-pill-option active"
+                  data-model="gemini-4-argon"
+                  title="Model: Gemini 4.0 Argon"
+                  aria-pressed="true"
+                >
+                  Argon
+                </button>
+              </div>
+              <div
+                id="effortToggleGroup"
+                class="pill composer-pill-group effort-pill-group"
+                role="group"
+                aria-label="Reasoning effort selection"
               >
-                <span class="pill-toggle-prefix">Effort</span>
-                <span id="effortToggleLabel" class="pill-toggle-value">High</span>
-              </button>
+                <button
+                  type="button"
+                  class="composer-pill-option"
+                  data-effort="low"
+                  title="Reasoning effort: Low"
+                  aria-pressed="false"
+                >
+                  Low
+                </button>
+                <button
+                  type="button"
+                  class="composer-pill-option"
+                  data-effort="medium"
+                  title="Reasoning effort: Medium"
+                  aria-pressed="false"
+                >
+                  Medium
+                </button>
+                <button
+                  type="button"
+                  class="composer-pill-option active"
+                  data-effort="high"
+                  title="Reasoning effort: High"
+                  aria-pressed="true"
+                >
+                  High
+                </button>
+              </div>
               <button id="sendBtn" class="btn-send" type="button">Send ↵</button>
             </div>
           </div>

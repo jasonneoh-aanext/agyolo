@@ -761,7 +761,7 @@ mod tests {
             "#browsePathBtn must be inside .composer-wrap above .composer-box"
         );
 
-        // Model and effort pill toggles are inside .composer-footer / .composer-actions beside #sendBtn
+        // Model (2 pills in a large pill) and effort (3 pills in a large pill) are inside .composer-footer / .composer-actions beside #sendBtn
         let styles_css = fs::read_to_string(public_dir.join("styles.css"))
             .expect("public/styles.css should exist");
         let composer_footer_idx = index_html
@@ -770,25 +770,52 @@ mod tests {
         let composer_actions_idx = index_html
             .find("class=\"composer-actions\"")
             .expect(".composer-actions should exist");
-        let model_toggle_idx = index_html
-            .find("id=\"modelToggleBtn\"")
-            .expect("#modelToggleBtn should exist");
-        let effort_toggle_idx = index_html
-            .find("id=\"effortToggleBtn\"")
-            .expect("#effortToggleBtn should exist");
+        let model_group_idx = index_html
+            .find("id=\"modelToggleGroup\"")
+            .expect("#modelToggleGroup should exist");
+        let flash_pill_idx = index_html
+            .find("data-model=\"gemini-3.8-flash\"")
+            .expect("Flash model pill should exist");
+        let argon_pill_idx = index_html
+            .find("data-model=\"gemini-4-argon\"")
+            .expect("Argon model pill should exist");
+        let effort_group_idx = index_html
+            .find("id=\"effortToggleGroup\"")
+            .expect("#effortToggleGroup should exist");
+        let low_effort_idx = index_html
+            .find("data-effort=\"low\"")
+            .expect("Low effort pill should exist");
+        let medium_effort_idx = index_html
+            .find("data-effort=\"medium\"")
+            .expect("Medium effort pill should exist");
+        let high_effort_idx = index_html
+            .find("data-effort=\"high\"")
+            .expect("High effort pill should exist");
         let send_btn_idx = index_html
             .find("id=\"sendBtn\"")
             .expect("#sendBtn should exist");
         assert!(
             composer_footer_idx < composer_actions_idx
-                && composer_actions_idx < model_toggle_idx
-                && model_toggle_idx < effort_toggle_idx
-                && effort_toggle_idx < send_btn_idx,
-            "#modelToggleBtn and #effortToggleBtn must be inside .composer-actions beside #sendBtn"
+                && composer_actions_idx < model_group_idx
+                && model_group_idx < flash_pill_idx
+                && flash_pill_idx < argon_pill_idx
+                && argon_pill_idx < effort_group_idx
+                && effort_group_idx < low_effort_idx
+                && low_effort_idx < medium_effort_idx
+                && medium_effort_idx < high_effort_idx
+                && high_effort_idx < send_btn_idx,
+            "#modelToggleGroup (Flash, Argon) and #effortToggleGroup (Low, Medium, High) must be inside .composer-actions beside #sendBtn"
         );
-        assert!(styles_css.contains(".composer-pill-toggle"));
-        assert!(app_js.contains("cycleModelSelection"));
-        assert!(app_js.contains("cycleEffortSelection"));
+        assert!(styles_css.contains(".composer-pill-group"));
+        assert!(styles_css.contains(".composer-pill-option"));
+        assert!(app_js.contains("selectModel"));
+        assert!(app_js.contains("selectEffort"));
+        assert!(app_js.contains("label: 'Flash'"));
+        assert!(app_js.contains("label: 'Argon'"));
+        assert!(!app_js.contains("gemini-3.1-pro"));
+        assert!(!app_js.contains("gemini-3.1-flash-lite"));
+        assert!(!app_js.contains("claude-sonnet-5-5"));
+        assert!(!app_js.contains("claude-opus-5-5"));
 
         // New session empty state does not render example prompt pills
         assert!(!app_js.contains("useQuickPrompt"));

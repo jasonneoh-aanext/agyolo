@@ -102,10 +102,14 @@ const pathSelectorGroup = document.getElementById('pathSelectorGroup');
 const browsePathBtn = document.getElementById('browsePathBtn');
 const newSessionBtn = document.getElementById('newSessionBtn');
 const promptInput = document.getElementById('promptInput');
-const modelToggleBtn = document.getElementById('modelToggleBtn');
-const modelToggleLabel = document.getElementById('modelToggleLabel');
-const effortToggleBtn = document.getElementById('effortToggleBtn');
-const effortToggleLabel = document.getElementById('effortToggleLabel');
+const modelToggleGroup = document.getElementById('modelToggleGroup');
+const effortToggleGroup = document.getElementById('effortToggleGroup');
+const modelOptionBtns = modelToggleGroup
+  ? Array.from(modelToggleGroup.querySelectorAll('.composer-pill-option[data-model]'))
+  : [];
+const effortOptionBtns = effortToggleGroup
+  ? Array.from(effortToggleGroup.querySelectorAll('.composer-pill-option[data-effort]'))
+  : [];
 const sendBtn = document.getElementById('sendBtn');
 const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
@@ -114,52 +118,22 @@ let isPickingDirectory = false;
 
 const STORAGE_KEY_MODEL = 'agy.selectedModel';
 const STORAGE_KEY_EFFORT = 'agy.selectedEffort';
+const DEFAULT_MODEL_ID = 'gemini-4-argon';
 
 const MODEL_CATALOG = [
   {
-    id: 'gemini-4-argon',
-    label: 'Gemini 4 Argon',
-    efforts: ['low', 'medium', 'high'],
-    defaultEffort: 'high'
-  },
-  {
     id: 'gemini-3.8-flash',
-    label: 'Gemini 3.8 Flash',
+    label: 'Flash',
     efforts: ['low', 'medium', 'high'],
     defaultEffort: 'high'
   },
   {
-    id: 'gemini-3.1-pro',
-    label: 'Gemini 3.1 Pro',
-    efforts: ['low', 'high'],
-    defaultEffort: 'high'
-  },
-  {
-    id: 'gemini-3.1-flash-lite',
-    label: 'Gemini 3.1 Flash Lite',
-    efforts: [],
-    defaultEffort: null
-  },
-  {
-    id: 'claude-sonnet-5-5',
-    label: 'Claude Sonnet 5.5',
-    efforts: ['low', 'medium', 'high', 'max'],
-    defaultEffort: 'high'
-  },
-  {
-    id: 'claude-opus-5-5',
-    label: 'Claude Opus 5.5',
-    efforts: ['low', 'medium', 'high', 'max'],
+    id: 'gemini-4-argon',
+    label: 'Argon',
+    efforts: ['low', 'medium', 'high'],
     defaultEffort: 'high'
   }
 ];
-
-const EFFORT_LABELS = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  max: 'Max'
-};
 
 function readStoredValue(key) {
   try {
@@ -183,17 +157,33 @@ function writeStoredValue(key, value) {
 }
 
 function resolveModelConfig(modelId) {
-  return MODEL_CATALOG.find((entry) => entry.id === modelId) || MODEL_CATALOG[0];
+  return (
+    MODEL_CATALOG.find((entry) => entry.id === modelId) ||
+    MODEL_CATALOG.find((entry) => entry.id === DEFAULT_MODEL_ID) ||
+    MODEL_CATALOG[0]
+  );
 }
 
-let selectedModel = resolveModelConfig(readStoredValue(STORAGE_KEY_MODEL)).id;
+let selectedModel = (() => {
+  const stored = readStoredValue(STORAGE_KEY_MODEL);
+  const resolved = resolveModelConfig(stored).id;
+  if (stored && stored !== resolved) {
+    writeStoredValue(STORAGE_KEY_MODEL, resolved);
+  }
+  return resolved;
+})();
+
 let selectedEffort = (() => {
   const stored = readStoredValue(STORAGE_KEY_EFFORT);
   const config = resolveModelConfig(selectedModel);
   if (stored && config.efforts.includes(stored)) {
     return stored;
   }
-  return config.defaultEffort || 'high';
+  const fallback = config.defaultEffort || 'high';
+  if (stored && stored !== fallback) {
+    writeStoredValue(STORAGE_KEY_EFFORT, fallback);
+  }
+  return fallback;
 })();
 
 function getSelectedModelConfig() {
@@ -211,12 +201,10 @@ function getEffectiveEffort() {
   return config.defaultEffort || config.efforts[0];
 }
 
-function cycleModelSelection(step = 1) {
+function selectModel(modelId) {
   if (getActiveState().isRunning) return;
-  const currentIdx = MODEL_CATALOG.findIndex((entry) => entry.id === selectedModel);
-  const baseIdx = currentIdx >= 0 ? currentIdx : 0;
-  const nextIdx = (baseIdx + step + MODEL_CATALOG.length) % MODEL_CATALOG.length;
-  const nextConfig = MODEL_CATALOG[nextIdx];
+  const nextConfig = MODEL_CATALOG.find((entry) => entry.id === modelId);
+  if (!nextConfig) return;
   selectedModel = nextConfig.id;
   writeStoredValue(STORAGE_KEY_MODEL, selectedModel);
 
@@ -228,15 +216,11 @@ function cycleModelSelection(step = 1) {
   syncComposerAndStatusBar();
 }
 
-function cycleEffortSelection(step = 1) {
+function selectEffort(effort) {
   if (getActiveState().isRunning) return;
   const config = getSelectedModelConfig();
-  if (!config.efforts || config.efforts.length === 0) return;
-  const currentEffort = getEffectiveEffort();
-  const currentIdx = config.efforts.indexOf(currentEffort);
-  const baseIdx = currentIdx >= 0 ? currentIdx : 0;
-  const nextIdx = (baseIdx + step + config.efforts.length) % config.efforts.length;
-  selectedEffort = config.efforts[nextIdx];
+  if (!config.efforts || !config.efforts.includes(effort)) return;
+  selectedEffort = effort;
   writeStoredValue(STORAGE_KEY_EFFORT, selectedEffort);
   syncComposerAndStatusBar();
 }
@@ -386,27 +370,26 @@ function syncComposerAndStatusBar() {
   const effectiveEffort = getEffectiveEffort();
   const isTurnRunning = Boolean(state.isRunning);
 
-  if (modelToggleLabel) {
-    modelToggleLabel.textContent = modelConfig.label;
+  if (modelToggleGroup) {
+    modelToggleGroup.classList.toggle('disabled', isTurnRunning);
   }
-  if (modelToggleBtn) {
-    modelToggleBtn.disabled = isTurnRunning;
-    modelToggleBtn.dataset.model = modelConfig.id;
-    modelToggleBtn.title = `Model: ${modelConfig.label} (click to cycle)`;
+  for (const btn of modelOptionBtns) {
+    const isActive = btn.dataset.model === modelConfig.id;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    btn.disabled = isTurnRunning;
   }
 
-  if (effortToggleLabel) {
-    effortToggleLabel.textContent = effectiveEffort
-      ? EFFORT_LABELS[effectiveEffort] || effectiveEffort
-      : 'Auto';
+  const hasAdjustableEffort = Boolean(modelConfig.efforts && modelConfig.efforts.length > 0);
+  const isEffortDisabled = isTurnRunning || !hasAdjustableEffort;
+  if (effortToggleGroup) {
+    effortToggleGroup.classList.toggle('disabled', isEffortDisabled);
   }
-  if (effortToggleBtn) {
-    const hasAdjustableEffort = Boolean(modelConfig.efforts && modelConfig.efforts.length > 0);
-    effortToggleBtn.disabled = isTurnRunning || !hasAdjustableEffort;
-    effortToggleBtn.dataset.effort = effectiveEffort || 'none';
-    effortToggleBtn.title = hasAdjustableEffort
-      ? `Reasoning effort: ${EFFORT_LABELS[effectiveEffort] || effectiveEffort} (click to cycle)`
-      : `Reasoning effort is fixed for ${modelConfig.label}`;
+  for (const btn of effortOptionBtns) {
+    const isActive = Boolean(effectiveEffort && btn.dataset.effort === effectiveEffort);
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    btn.disabled = isEffortDisabled;
   }
 
   // Composer is only disabled for the session that is currently running
@@ -1800,15 +1783,15 @@ cwdInput.addEventListener('keydown', (e) => {
   }
 });
 
-if (modelToggleBtn) {
-  modelToggleBtn.addEventListener('click', (e) => {
-    cycleModelSelection(e.shiftKey ? -1 : 1);
+for (const btn of modelOptionBtns) {
+  btn.addEventListener('click', () => {
+    selectModel(btn.dataset.model);
   });
 }
 
-if (effortToggleBtn) {
-  effortToggleBtn.addEventListener('click', (e) => {
-    cycleEffortSelection(e.shiftKey ? -1 : 1);
+for (const btn of effortOptionBtns) {
+  btn.addEventListener('click', () => {
+    selectEffort(btn.dataset.effort);
   });
 }
 
