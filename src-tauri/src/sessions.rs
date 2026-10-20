@@ -790,6 +790,12 @@ mod tests {
         assert!(app_js.contains("cycleModelSelection"));
         assert!(app_js.contains("cycleEffortSelection"));
 
+        // New session empty state does not render example prompt pills
+        assert!(!app_js.contains("useQuickPrompt"));
+        assert!(!app_js.contains("Trigger Outside-Workspace Prompt"));
+        assert!(!app_js.contains("Trigger Interactive ask_question UI"));
+        assert!(!app_js.contains("Trigger Unsandboxed Command Prompt"));
+
         // Frontend scripts use Tauri IPC exclusively with zero legacy /api/ HTTP fallbacks
         assert!(app_js.contains("__TAURI__"));
         assert!(!app_js.contains("/api/"));

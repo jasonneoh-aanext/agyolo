@@ -368,13 +368,6 @@ function scrollToBottom() {
   viewportEl.scrollTop = viewportEl.scrollHeight;
 }
 
-function useQuickPrompt(text) {
-  const state = getActiveState();
-  state.draftPrompt = text;
-  promptInput.value = text;
-  promptInput.focus();
-}
-
 function syncComposerAndStatusBar() {
   const state = getActiveState();
   statusText.textContent = state.statusMessage || 'Idle · Ready';
@@ -844,17 +837,6 @@ function renderStream() {
         <p>
           Run multiple concurrent sessions from the sidebar. Messages, background tasks, tool calls, and interactive <code>ask_question</code> modals stream live from <code>transcript_full.jsonl</code>.
         </p>
-        <div class="quick-chips">
-          <button class="chip" onclick="useQuickPrompt('Read lines 1 to 3 of ~/.zshrc using view_file and summarize them.')">
-            Trigger Outside-Workspace Prompt (~/.zshrc)
-          </button>
-          <button class="chip" onclick="useQuickPrompt('Call ask_question to ask me whether this repo should be Private or Public, then repeat my answer.')">
-            Trigger Interactive ask_question UI
-          </button>
-          <button class="chip" onclick="useQuickPrompt('Run echo HELLO_AGY_SANDBOX using run_command with BypassSandbox set to true.')">
-            Trigger Unsandboxed Command Prompt
-          </button>
-        </div>
       </div>
     `;
     return;

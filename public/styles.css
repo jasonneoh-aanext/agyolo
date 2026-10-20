@@ -476,7 +476,7 @@ body {
   font-size: 13px;
   color: var(--text-muted);
   max-width: 520px;
-  margin: 0 auto 20px;
+  margin: 0 auto;
 }
 
 .quick-chips {
